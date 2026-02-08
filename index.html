@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gislegrillen - Köksdashboard</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .dashboard-header {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .dashboard-header h1 {
+            margin: 0;
+            color: #333;
+            font-weight: bold;
+        }
+        
+        .stats-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stats-card h3 {
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        
+        .stats-card p {
+            color: #666;
+            margin: 0;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .order-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .order-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .order-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+        
+        .order-id {
+            font-size: 1.3rem;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .order-time {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .order-items {
+            margin-bottom: 20px;
+        }
+        
+        .order-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        
+        .order-item:last-child {
+            border-bottom: none;
+        }
+        
+        .item-name {
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .item-quantity {
+            background: #667eea;
+            color: white;
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            margin-right: 10px;
+        }
+        
+        .item-price {
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .special-requests {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+        
+        .special-requests i {
+            color: #ffc107;
+            margin-right: 8px;
+        }
+        
+        .order-total {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 15px;
+            border-top: 2px solid #f0f0f0;
+            margin-bottom: 20px;
+        }
+        
+        .total-label {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .total-amount {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .status-badge {
+            padding: 8px 20px;
+            border-radius: 25px;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 1px;
+        }
+        
+        .status-pending {
+            background: #ffc107;
+            color: #000;
+        }
+        
+        .status-ready {
+            background: #28a745;
+            color: white;
+        }
+        
+        .status-completed {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-mark-ready {
+            width: 100%;
+            padding: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .empty-state {
+            background: white;
+            border-radius: 15px;
+            padding: 60px;
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .empty-state i {
+            font-size: 5rem;
+            color: #ddd;
+            margin-bottom: 20px;
+        }
+        
+        .empty-state h3 {
+            color: #999;
+            margin-bottom: 10px;
+        }
+        
+        .refresh-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            font-size: 1.5rem;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: white;
+        }
+        
+        .loading i {
+            font-size: 3rem;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="container">
+        <div class="dashboard-header">
+            <div class="row align-items-center">
+                <div class="col-md-8">
+                    <h1><i class="bi bi-shop"></i> Gislegrillen Köksdashboard</h1>
+                    <p class="text-muted mb-0">Realtidsöversikt över inkommande beställningar</p>
+                </div>
+                <div class="col-md-4 text-end">
+                    <button class="btn btn-primary btn-lg" onclick="loadOrders()">
+                        <i class="bi bi-arrow-clockwise"></i> Uppdatera
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Statistics -->
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="stats-card">
+                    <p>Väntande</p>
+                    <h3 id="pending-count" class="text-warning">0</h3>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stats-card">
+                    <p>Redo</p>
+                    <h3 id="ready-count" class="text-success">0</h3>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stats-card">
+                    <p>Totalt idag</p>
+                    <h3 id="total-count" class="text-primary">0</h3>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Orders Container -->
+        <div id="orders-container">
+            <div class="loading">
+                <i class="bi bi-arrow-repeat"></i>
+                <p>Laddar beställningar...</p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Refresh Button -->
+    <button class="btn btn-primary refresh-btn" onclick="loadOrders()" title="Uppdatera">
+        <i class="bi bi-arrow-clockwise"></i>
+    </button>
+    
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        // Configuration
+        const API_BASE = window.location.origin;
+        const REFRESH_INTERVAL = 30000; // 30 seconds
+        
+        // Auto-refresh
+        let refreshTimer;
+        
+        // Load orders from API
+        async function loadOrders() {
+            try {
+                const response = await fetch(`${API_BASE}/orders`);
+                const orders = await response.json();
+                
+                displayOrders(orders);
+                updateStatistics(orders);
+                
+                // Reset refresh timer
+                clearTimeout(refreshTimer);
+                refreshTimer = setTimeout(loadOrders, REFRESH_INTERVAL);
+                
+            } catch (error) {
+                console.error('Error loading orders:', error);
+                document.getElementById('orders-container').innerHTML = `
+                    <div class="empty-state">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <h3>Kunde inte ladda beställningar</h3>
+                        <p class="text-muted">Kontrollera att servern körs</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Display orders
+        function displayOrders(orders) {
+            const container = document.getElementById('orders-container');
+            
+            if (orders.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="bi bi-inbox"></i>
+                        <h3>Inga beställningar än</h3>
+                        <p class="text-muted">Nya beställningar visas här automatiskt</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            // Sort: pending first, then ready, then completed
+            const sortOrder = { 'pending': 1, 'ready': 2, 'completed': 3 };
+            orders.sort((a, b) => {
+                const statusDiff = sortOrder[a.status] - sortOrder[b.status];
+                if (statusDiff !== 0) return statusDiff;
+                return new Date(b.timestamp) - new Date(a.timestamp);
+            });
+            
+            container.innerHTML = orders.map(order => createOrderCard(order)).join('');
+        }
+        
+        // Create order card HTML
+        function createOrderCard(order) {
+            const statusClass = `status-${order.status}`;
+            const statusText = {
+                'pending': 'Väntande',
+                'ready': 'Redo',
+                'completed': 'Klar'
+            }[order.status] || order.status;
+            
+            const specialRequestsHtml = order.special_requests ? `
+                <div class="special-requests">
+                    <i class="bi bi-exclamation-circle-fill"></i>
+                    <strong>Special:</strong> ${order.special_requests}
+                </div>
+            ` : '';
+            
+            const itemsHtml = order.items.map(item => `
+                <div class="order-item">
+                    <div>
+                        <span class="item-quantity">${item.quantity}x</span>
+                        <span class="item-name">${item.name}</span>
+                    </div>
+                    <span class="item-price">${item.price} kr</span>
+                </div>
+            `).join('');
+            
+            const actionButton = order.status === 'pending' ? `
+                <button class="btn btn-success btn-mark-ready" onclick="markAsReady('${order.order_id}')">
+                    <i class="bi bi-check-circle"></i> Markera som Redo
+                </button>
+            ` : order.status === 'ready' ? `
+                <button class="btn btn-secondary btn-mark-ready" onclick="markAsCompleted('${order.order_id}')">
+                    <i class="bi bi-check-all"></i> Markera som Klar
+                </button>
+            ` : '';
+            
+            return `
+                <div class="order-card">
+                    <div class="order-header">
+                        <div>
+                            <div class="order-id">${order.order_id}</div>
+                            <div class="order-time">
+                                <i class="bi bi-clock"></i> ${order.timestamp}
+                            </div>
+                        </div>
+                        <span class="status-badge ${statusClass}">${statusText}</span>
+                    </div>
+                    
+                    <div class="order-items">
+                        ${itemsHtml}
+                    </div>
+                    
+                    ${specialRequestsHtml}
+                    
+                    <div class="order-total">
+                        <span class="total-label">Totalt:</span>
+                        <span class="total-amount">${order.total_price} kr</span>
+                    </div>
+                    
+                    ${actionButton}
+                </div>
+            `;
+        }
+        
+        // Update statistics
+        function updateStatistics(orders) {
+            const pending = orders.filter(o => o.status === 'pending').length;
+            const ready = orders.filter(o => o.status === 'ready').length;
+            const total = orders.length;
+            
+            document.getElementById('pending-count').textContent = pending;
+            document.getElementById('ready-count').textContent = ready;
+            document.getElementById('total-count').textContent = total;
+        }
+        
+        // Mark order as ready
+        async function markAsReady(orderId) {
+            await updateOrderStatus(orderId, 'ready');
+        }
+        
+        // Mark order as completed
+        async function markAsCompleted(orderId) {
+            await updateOrderStatus(orderId, 'completed');
+        }
+        
+        // Update order status
+        async function updateOrderStatus(orderId, status) {
+            try {
+                const response = await fetch(`${API_BASE}/update_order_status`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        order_id: orderId,
+                        status: status
+                    })
+                });
+                
+                if (response.ok) {
+                    loadOrders(); // Refresh orders
+                } else {
+                    alert('Kunde inte uppdatera beställning');
+                }
+            } catch (error) {
+                console.error('Error updating order:', error);
+                alert('Fel vid uppdatering av beställning');
+            }
+        }
+        
+        // Initialize
+        loadOrders();
+    </script>
+</body>
+</html>
