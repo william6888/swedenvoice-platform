@@ -1,0 +1,40 @@
+═══════════════════════════════════════════════════════════════
+    🍕 GISLEGRILLEN - SNABBSTART 🍕
+═══════════════════════════════════════════════════════════════
+
+STEG 1: Installera dependencies
+────────────────────────────────
+pip install -r requirements.txt
+
+
+STEG 2: Starta servern (Terminal 1)
+────────────────────────────────────
+./start_server.sh
+
+
+STEG 3: Starta ngrok (Terminal 2)
+──────────────────────────────────
+./start_ngrok.sh
+
+→ Kopiera HTTPS-URL:en som visas!
+
+
+STEG 4: Uppdatera Vapi
+───────────────────────
+Gå till: https://vapi.ai/dashboard
+→ Din Assistant → Tools → place_order
+→ URL: https://DIN-NGROK-URL.ngrok-free.app/place_order
+
+
+STEG 5: Testa!
+───────────────
+Ring ditt Vapi-nummer och beställ en pizza!
+
+═══════════════════════════════════════════════════════════════
+
+📚 För mer information, läs:
+   • KOMPLETT_GUIDE.md (fullständig guide)
+   • STARTA_SYSTEMET.md (svensk guide)
+   • VAPI_SETUP_GUIDE.md (Vapi-konfiguration)
+
+═══════════════════════════════════════════════════════════════
