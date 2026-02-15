@@ -79,12 +79,28 @@ class UpdateOrderStatusRequest(BaseModel):
 
 # ==================== HELPER FUNCTIONS ====================
 
-def _normalize_item_from_vapi(it: dict) -> dict:
-    """Vapi skickar camelCase (specialRequests). Normalisera till snake_case."""
-    d = dict(it)
-    if "specialRequests" in d and "special_requests" not in d:
-        d["special_requests"] = d.pop("specialRequests")
-    return d
+def _parse_items_from_params(params: dict) -> list:
+    """Extrahera items från params – stödjer items, order.items, full_order.items."""
+    items = params.get("items", [])
+    if not items and "order" in params:
+        items = params.get("order", {}).get("items", [])
+    if not items and "full_order" in params:
+        items = params.get("full_order", {}).get("items", [])
+    if not isinstance(items, list):
+        return []
+    # Unwrap { "item": {...} } och normalisera special_requests (snake_case + camelCase)
+    out = []
+    for it in items:
+        if isinstance(it, dict) and "item" in it and isinstance(it.get("item"), dict):
+            d = dict(it["item"])
+        elif isinstance(it, dict):
+            d = dict(it)
+        else:
+            continue
+        if "specialRequests" in d and "special_requests" not in d:
+            d["special_requests"] = d.pop("specialRequests")
+        out.append(d)
+    return out
 
 def load_menu():
     """Load menu from JSON file"""
@@ -277,7 +293,13 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
         if cid in seen_ids:
             continue
         seen_ids.add(cid)
-        out.append((cid, tc.get("parameters", {})))
+        params = tc.get("parameters", {})
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                params = {}
+        out.append((cid, params))
     return out
 
 
@@ -341,7 +363,7 @@ async def place_order(request: Request):
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
                 for tool_call_id, params in calls:
-                    items_data = params.get("items", [])
+                    items_data = _parse_items_from_params(params)
                     if not items_data:
                         results.append({
                             "name": "place_order",
@@ -350,7 +372,7 @@ async def place_order(request: Request):
                         })
                         continue
                     try:
-                        items = [OrderItem(**_normalize_item_from_vapi(it)) for it in items_data]
+                        items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"))
                         results.append({
                             "name": "place_order",
@@ -510,7 +532,7 @@ async def vapi_webhook(request: Request):
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
-                items_data = params.get("items", [])
+                items_data = _parse_items_from_params(params)
                 if not items_data:
                     results.append({
                         "name": "place_order",
@@ -519,7 +541,7 @@ async def vapi_webhook(request: Request):
                     })
                     continue
                 try:
-                    items = [OrderItem(**_normalize_item_from_vapi(it)) for it in items_data]
+                    items = [OrderItem(**it) for it in items_data]
                     order = _process_place_order(items, params.get("special_requests"))
                     results.append({
                         "name": "place_order",

@@ -233,14 +233,14 @@ Kopiera HELA innehållet från filen `system_prompt.md`
 Place a customer order with items, quantities, and special requests. Call this when the customer has confirmed their complete order.
 ```
 
-**Parameters Schema:**
+**Parameters Schema:** (special_requests per item)
 ```json
 {
   "type": "object",
   "properties": {
     "items": {
       "type": "array",
-      "description": "List of ordered items with ID, name, and quantity",
+      "description": "List of ordered items with ID, name, quantity, and optional special_requests per item",
       "items": {
         "type": "object",
         "properties": {
@@ -256,14 +256,14 @@ Place a customer order with items, quantities, and special requests. Call this w
             "type": "integer",
             "description": "Number of items ordered",
             "minimum": 1
+          },
+          "special_requests": {
+            "type": "string",
+            "description": "Special requests for THIS item (e.g. 'extra sås', 'utan lök')"
           }
         },
         "required": ["id", "name", "quantity"]
       }
-    },
-    "special_requests": {
-      "type": "string",
-      "description": "Any special requests from the customer (e.g., 'ingen lök', 'extra ost', 'starksås på sidan')"
     }
   },
   "required": ["items"]
