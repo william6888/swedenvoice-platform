@@ -296,6 +296,21 @@ kill -9 $(lsof -t -i:8000)
 ./start_server.sh
 ```
 
+### Problem: SMS skickas inte – tool-calls når inte webhooken
+
+**Symptom:** place_order fungerar (order sparas, Pushover skickas) men inget SMS. Railway-loggarna visar `speech-update`, `conversation-update` men aldrig `event_type=tool-calls`.
+
+**Orsak:** place_order-verktyget har en egen Server URL som pekar på t.ex. `/place_order`. Tool-calls skickas då till den URL:en, inte till `/vapi/webhook` där vi har kundnummer (`message.call.customer.number`).
+
+**Lösning i Vapi Dashboard:**
+1. Gå till **Assistants** → din assistant → **Functions** → place_order
+2. Kontrollera **Server URL** för place_order
+3. **Ta bort** den egna URL:en, ELLER sätt den till samma som assistant:  
+   `https://DIN-RAILWAY-URL/vapi/webhook`
+4. Spara – då kommer tool-calls till webhooken med full kontext (inkl. kundnummer)
+
+**Verifiera:** Efter ändring, gör ett testsamtal. I Railway-loggarna ska du nu se `📞 VAPI WEBHOOK: event_type=tool-calls` när beställningen läggs.
+
 ### Problem: Beställningen når inte servern
 
 **Debug-steg:**
