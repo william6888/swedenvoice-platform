@@ -48,12 +48,18 @@ app = FastAPI(
 
 # CORS middleware for dashboard
 app.add_middleware(
-    CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_post_path(request: Request, call_next):
+    """Logga POST till place_order/webhook – spåra var tool-calls går."""
+    if request.method == "POST" and request.url.path in ("/place_order", "/vapi/webhook"):
+        print(f">>> INCOMING POST {request.url.path} <<<")
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup_debug():
@@ -429,10 +435,12 @@ async def place_order(request: Request):
     """
     Main order placement endpoint - Called by Vapi tool OR direct API.
     Supports both Vapi tool-calls format and direct JSON format.
+    OBS: Om Vapi-place_order har egen Server URL går tool-calls HIT, inte till /vapi/webhook.
     """
     try:
         body = await request.json()
-        print("\n" + "="*50)
+        print("\n!!! PLACE_ORDER ENDPOINT HIT !!! (Vapi skickar tool-calls hit om tool har egen URL)")
+        print("="*50)
         print("📥 PLACE_ORDER ANROPAD! (från Vapi Tool URL eller direkt)")
         print("="*50)
         print(f"DEBUG: body keys={list(body.keys())}")
@@ -473,10 +481,12 @@ async def place_order(request: Request):
                         })
                         try:
                             customer_phone = _get_customer_phone_from_webhook(body)
+                            print("=== SMS CHECKPOINT A (i /place_order) ===")
                             print(f"DEBUG SMS [/place_order]: Sending SMS to: {customer_phone}")
                             if customer_phone:
+                                print("=== SMS CHECKPOINT B (innan Vonage i /place_order) ===")
                                 sms_result = send_sms_order_confirmation(order, customer_phone)
-                                print(f"DEBUG SMS [/place_order]: SMS result: {sms_result}")
+                                print(f"=== SMS CHECKPOINT C: Vonage result={sms_result} ===")
                             else:
                                 print("DEBUG SMS [/place_order]: Ingen kundtelefon – SMS ej skickat")
                         except Exception as sms_err:
