@@ -31,81 +31,61 @@
     {"id": 29, "name": "Salami", "price": 140, "description": "Lök, paprika, salami, kebabsås"},
     {"id": 30, "name": "Azteka", "price": 140, "description": "Skinka, jalapeño, tacosås, kebabsås"},
     {"id": 31, "name": "Mexicana", "price": 140, "description": "Lök, jalapeño, tacosås, köttfärs, vitlök"},
-    {"id": 32, "name": "GSK Special", "price": 140, "description": "Skinka, lök, bacon, fläskfilé, bearnaisesås"},
-    {"id": 33, "name": "GIS Special", "price": 140, "description": "Skinka, champinjoner, lök, fläskfilé, kebabsås"},
+    {"id": 32, "name": "GSK-Special", "price": 140, "description": "Skinka, lök, bacon, fläskfilé, bearnaisesås"},
+    {"id": 33, "name": "GIS-Special", "price": 140, "description": "Skinka, champinjoner, lök, fläskfilé, kebabsås"},
     {"id": 34, "name": "Småland", "price": 140, "description": "Skinka, pommes, kebabsås"},
     {"id": 35, "name": "Kebabpizza", "price": 140, "description": "Lök, champinjoner, kebabkött, kebabsås"},
     {"id": 36, "name": "Batman", "price": 140, "description": "Skinka, kebabkött, kebabsås"},
     {"id": 37, "name": "Hammare", "price": 140, "description": "Kebabkött, pommes, kebabsås"},
     {"id": 38, "name": "Sverige", "price": 140, "description": "Lök, kebabkött, sallad, kebabsås"},
     {"id": 39, "name": "Huset", "price": 140, "description": "Lök, kebabkött, stark sås, vitlök (inbakad)"},
-    {"id": 40, "name": "Recticel Special", "price": 145, "description": "Skinka, ananas, kebabkött, kebabsås"},
+    {"id": 40, "name": "Recticel-Special", "price": 145, "description": "Skinka, ananas, kebabkött, kebabsås"},
     {"id": 41, "name": "Titanic", "price": 145, "description": "Ananas, räkor, kebabkött, sallad, kebabsås"},
     {"id": 42, "name": "Poker", "price": 145, "description": "Skinka, champinjoner, oxfilé, bearnaisesås"},
     {"id": 43, "name": "Tropicana", "price": 145, "description": "Skinka, banan, oxfilé, curry"},
-    {"id": 44, "name": "Folie Special", "price": 145, "description": "Lök, sparris, oxfilé, bearnaisesås"},
+    {"id": 44, "name": "Folie-Special", "price": 145, "description": "Lök, sparris, oxfilé, bearnaisesås"},
     {"id": 45, "name": "Acapulco", "price": 145, "description": "Champinjoner, vitlök, tacosås, jalapeño, oxfilé"},
     {"id": 46, "name": "Gorgonzola", "price": 145, "description": "Sparris, oxfilé, gorgonzola"},
     {"id": 47, "name": "Kycklingpizza", "price": 145, "description": "Lök, banan, kyckling, curry, bearnaisesås"},
     {"id": 48, "name": "Gislaved", "price": 145, "description": "Kyckling, pommes, kebabsås"},
-    {"id": 49, "name": "IBBE Special", "price": 150, "description": "Lök, kebabkött, pommes, sallad, kebabsås"},
-    {"id": 50, "name": "ALEX Special", "price": 150, "description": "Lök, kyckling, pommes, sallad, kebabsås"},
+    {"id": 49, "name": "IBBE-Special", "price": 150, "description": "Lök, kebabkött, pommes, sallad, kebabsås"},
+    {"id": 50, "name": "ALEX-Special", "price": 150, "description": "Lök, kyckling, pommes, sallad, kebabsås"},
     {"id": 51, "name": "Black Jack", "price": 150, "description": "Fläskfilé, oxfilé, kebabkött, kebabsås, bearnaisesås"},
     {"id": 52, "name": "Polisen", "price": 150, "description": "Skinka, champinjoner, ananas, räkor, kebabkött, kebabsås"}
   ],
   "kebabs": [
-    {"id": 101, "name": "Kebab med bröd", "price": 135, "description": "Pitabröd, kebabkött, sallad, tomat, lök, fefferoni, valfri sås"},
-    {"id": 102, "name": "Kebabrulle", "price": 135, "description": "Nybakat bröd, kebabkött, sallad, tomat, lök, fefferoni, valfri sås"},
-    {"id": 103, "name": "Kebab med mos", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"},
-    {"id": 104, "name": "Kebab med pommes", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
-    {"id": 105, "name": "Lejon Kebab", "price": 150, "description": "Nybakat bröd, kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"}
+    {"id": 53, "name": "Kebab med bröd", "price": 135, "description": "Pitabröd, kebabkött, sallad, tomat, lök, fefferoni, valfri sås"},
+    {"id": 54, "name": "Kebabrulle", "price": 135, "description": "Nybakat bröd, kebabkött, sallad, tomat, lök, fefferoni, valfri sås"},
+    {"id": 55, "name": "Kebab med mos", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"},
+    {"id": 56, "name": "Kebab med pommes", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
+    {"id": 57, "name": "Lejon-Kebab", "price": 150, "description": "Nybakat bröd, kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"}
   ],
   "kyckling": [
-    {"id": 201, "name": "Kyckling i bröd", "price": 140, "description": "Pitabröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
-    {"id": 202, "name": "Kycklingrulle", "price": 140, "description": "Nybakat bröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
-    {"id": 203, "name": "Kycklingtallrik", "price": 140, "description": "Kyckling, sallad, tomat, gurka, lök, mos, valfri sås"}
-  ],
-  "burgers": [
-    {"id": 301, "name": "Hamburgare i bröd 90g", "price": 65, "description": "90g nötfärs i pitabröd"},
-    {"id": 302, "name": "Hamburgare med strips/mos 90g", "price": 95, "description": "90g nötfärs med strips eller mos"},
-    {"id": 303, "name": "Hamburgare i bröd 150g", "price": 75, "description": "150g nötfärs i bröd"},
-    {"id": 304, "name": "Hamburgare med strips/mos 150g", "price": 105, "description": "150g nötfärs med strips eller mos"},
-    {"id": 305, "name": "Hamburgare i bröd 200g", "price": 85, "description": "200g nötfärs i bröd"},
-    {"id": 306, "name": "Hamburgare med strips/mos 200g", "price": 115, "description": "200g nötfärs med strips eller mos"}
-  ],
-  "korv": [
-    {"id": 401, "name": "Korv grillad i bröd", "price": 25, "description": "Grillad korv i bröd"},
-    {"id": 402, "name": "Korv grillad med strips/mos", "price": 55, "description": "Grillad korv med strips eller mos"},
-    {"id": 403, "name": "Bamse i bröd", "price": 35, "description": "Bamse i bröd"},
-    {"id": 404, "name": "Bamse med strips eller mos", "price": 65, "description": "Bamse med strips eller mos"}
+    {"id": 58, "name": "Kyckling i bröd", "price": 140, "description": "Pitabröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
+    {"id": 59, "name": "Kycklingrulle", "price": 140, "description": "Nybakat bröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
+    {"id": 60, "name": "Kycklingtallrik", "price": 140, "description": "Kyckling, sallad, tomat, gurka, lök, mos, valfri sås"}
   ],
   "sallader": [
-    {"id": 501, "name": "Hawaii sallad", "price": 135, "description": "Ost, skinka, ananas, ägg"},
-    {"id": 502, "name": "Grekisk sallad", "price": 135, "description": "Lök, paprika, oliver, fetaost"},
-    {"id": 503, "name": "Tonfisk sallad", "price": 135, "description": "Tonfisk, paprika, ägg, ost"},
-    {"id": 504, "name": "Kyckling sallad", "price": 135, "description": "Kyckling, ananas, paprika, ost"},
-    {"id": 505, "name": "Räksallad", "price": 135, "description": "Räkor, ägg, ost, citron"},
-    {"id": 506, "name": "Kebabsallad", "price": 135, "description": "Kebab, lök, fefferoni"}
+    {"id": 61, "name": "Hawaiisallad", "price": 135, "description": "Ost, skinka, ananas, ägg"},
+    {"id": 62, "name": "Grekisk sallad", "price": 135, "description": "Lök, paprika, oliver, fetaost"},
+    {"id": 63, "name": "Tonfisksallad", "price": 135, "description": "Tonfisk, paprika, ägg, ost"},
+    {"id": 64, "name": "Kycklingsallad", "price": 135, "description": "Kyckling, ananas, paprika, ost"},
+    {"id": 65, "name": "Räksallad", "price": 135, "description": "Räkor, ägg, ost, citron"},
+    {"id": 66, "name": "Kebabsallad", "price": 135, "description": "Kebab, lök, peperoni"}
   ],
   "ovrigt": [
-    {"id": 601, "name": "Köttbullar med mos och lingon", "price": 110, "description": "Köttbullar med mos och lingon"},
-    {"id": 602, "name": "Vegoburgare i bröd med strips", "price": 105, "description": "Vegoburgare i bröd med strips"},
-    {"id": 603, "name": "Lövbit med strips", "price": 125, "description": "Lövbit med strips"},
-    {"id": 604, "name": "Chicken Nuggets med strips", "price": 110, "description": "Chicken Nuggets med strips"},
-    {"id": 605, "name": "Fish N Chips", "price": 135, "description": "Fish N Chips"}
+    {"id": 67, "name": "Köttbullar med mos och lingon", "price": 110, "description": ""},
+    {"id": 68, "name": "Vegoburgare i bröd med strips", "price": 105, "description": ""},
+    {"id": 69, "name": "Lövbit med strips", "price": 125, "description": ""},
+    {"id": 70, "name": "Chicken Nuggets med strips", "price": 110, "description": ""},
+    {"id": 71, "name": "Fish N Chips", "price": 135, "description": ""}
   ],
   "lchf": [
-    {"id": 701, "name": "LCHF Pizza", "price": 135, "description": "Tomatsås, ost, skinka, lök, champinjoner, kebabkött/kyckling/fläskfilé och valfri sås"}
+    {"id": 72, "name": "LCHF-pizza", "price": 135, "description": "Tomatsås, ost, skinka, lök, champinjoner, kebabkött/kyckling/fläskfilé, valfri sås"}
   ],
   "schnitzel": [
-    {"id": 801, "name": "Wärdshusschnitzel", "price": 125, "description": "Sallad, tomat, gurka, aromsmör, strips"},
-    {"id": 802, "name": "Stor snitzare i bröd", "price": 85, "description": "Bröd, ost, paprika, citronpeppar"},
-    {"id": 803, "name": "Stor snitzare med strips", "price": 115, "description": "Bröd, ost, paprika, citronpeppar, strips"}
-  ],
-  "drinks": [
-    {"id": 901, "name": "Coca-Cola 33cl", "price": 25, "description": "Burk"},
-    {"id": 902, "name": "Fanta 33cl", "price": 25, "description": "Burk"},
-    {"id": 903, "name": "Sprite 33cl", "price": 25, "description": "Burk"},
-    {"id": 904, "name": "Vatten 50cl", "price": 20, "description": "Flaska"}
+    {"id": 73, "name": "Wärdshusschnitzel", "price": 125, "description": "Sallad, tomat, gurka, aromsmör, strips"},
+    {"id": 74, "name": "Stor snitzare i bröd", "price": 115, "description": "Bröd, ost, paprika, citronpeppar"},
+    {"id": 75, "name": "Stor snitzare med strips", "price": 115, "description": "Bröd, ost, paprika, citronpeppar"}
   ]
 }

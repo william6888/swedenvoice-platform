@@ -14,8 +14,8 @@ def test_menu_structure():
     with open("menu.json", "r", encoding="utf-8") as f:
         menu = json.load(f)
     
-    # Check categories (match gislegrillen.se struktur)
-    required_categories = ["pizzas", "kebabs", "burgers", "drinks"]
+    # Check categories
+    required_categories = ["pizzas", "kebabs", "kyckling", "sallader", "ovrigt"]
     for category in required_categories:
         assert category in menu, f"Missing category: {category}"
         print(f"  ✅ Category '{category}': {len(menu[category])} items")
@@ -92,15 +92,15 @@ def test_price_calculation():
     with open("menu.json", "r", encoding="utf-8") as f:
         menu = json.load(f)
     
-    # Test case: 1x Hawaii (125 kr) + 1x Coca-Cola (25 kr) = 150 kr (gislegrillen.se menyn)
+    # Test case: 1x Hawaii (125 kr) + 1x Vesuvio (125 kr) = 250 kr
     hawaii = next((p for p in menu["pizzas"] if p["id"] == 10 and p["name"] == "Hawaii"), None)
-    cola = next((d for d in menu["drinks"] if "Coca-Cola" in d["name"]), None)
+    vesuvio = next((p for p in menu["pizzas"] if p["id"] == 2 and p["name"] == "Vesuvio"), None)
     
     assert hawaii is not None, "Hawaii pizza not found"
-    assert cola is not None, "Coca-Cola not found"
+    assert vesuvio is not None, "Vesuvio pizza not found"
     
-    total = hawaii["price"] + cola["price"]
-    assert total == 150, f"Expected 150 kr, got {total} kr"
+    total = hawaii["price"] + vesuvio["price"]
+    assert total == 250, f"Expected 250 kr, got {total} kr"
     
     print(f"  ✅ Price calculation works correctly\n")
 
