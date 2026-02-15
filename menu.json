@@ -58,7 +58,8 @@
     {"id": 54, "name": "Kebabrulle", "price": 135, "description": "Nybakat bröd, kebabkött, sallad, tomat, lök, fefferoni, valfri sås"},
     {"id": 55, "name": "Kebab med mos", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"},
     {"id": 56, "name": "Kebab med pommes", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
-    {"id": 57, "name": "Lejon-Kebab", "price": 150, "description": "Nybakat bröd, kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"}
+    {"id": 57, "name": "Lejon-Kebab", "price": 150, "description": "Nybakat bröd, kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
+    {"id": 76, "name": "Kebabtallrik", "price": 140, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"}
   ],
   "kyckling": [
     {"id": 58, "name": "Kyckling i bröd", "price": 140, "description": "Pitabröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
