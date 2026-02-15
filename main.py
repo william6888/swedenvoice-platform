@@ -59,6 +59,7 @@ class OrderItem(BaseModel):
     name: str
     quantity: int
     price: Optional[float] = None
+    special_requests: Optional[str] = None
 
 class PlaceOrderRequest(BaseModel):
     items: List[OrderItem]
@@ -77,6 +78,13 @@ class UpdateOrderStatusRequest(BaseModel):
     status: str
 
 # ==================== HELPER FUNCTIONS ====================
+
+def _normalize_item_from_vapi(it: dict) -> dict:
+    """Vapi skickar camelCase (specialRequests). Normalisera till snake_case."""
+    d = dict(it)
+    if "specialRequests" in d and "special_requests" not in d:
+        d["special_requests"] = d.pop("specialRequests")
+    return d
 
 def load_menu():
     """Load menu from JSON file"""
@@ -276,6 +284,7 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
 def _process_place_order(items: List[OrderItem], special_requests: Optional[str] = None) -> Order:
     """Process order: validate, save, print, send Pushover. Returns Order."""
     enriched_items = []
+    per_item_specs = []
     for item in items:
         menu_item = find_menu_item(item.id)
         if not menu_item:
@@ -283,17 +292,22 @@ def _process_place_order(items: List[OrderItem], special_requests: Optional[str]
                 status_code=404, 
                 detail=f"Menu item with ID {item.id} not found"
             )
+        name = menu_item['name']
         enriched_items.append(OrderItem(
             id=item.id,
-            name=menu_item['name'],  # Alltid rätt namn från menyn, inte AI:ns gissning
+            name=name,
             quantity=item.quantity,
-            price=menu_item['price']
+            price=menu_item['price'],
+            special_requests=item.special_requests
         ))
+        if item.special_requests and item.special_requests.strip():
+            per_item_specs.append(f"{item.quantity}x {name}: {item.special_requests.strip()}")
+    combined_special = "; ".join(per_item_specs) if per_item_specs else special_requests
     total_price = calculate_total_price(enriched_items)
     order = Order(
         order_id=generate_order_id(),
         items=enriched_items,
-        special_requests=special_requests,
+        special_requests=combined_special,
         total_price=total_price,
         status="pending",
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -336,7 +350,7 @@ async def place_order(request: Request):
                         })
                         continue
                     try:
-                        items = [OrderItem(**it) for it in items_data]
+                        items = [OrderItem(**_normalize_item_from_vapi(it)) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"))
                         results.append({
                             "name": "place_order",
@@ -505,7 +519,7 @@ async def vapi_webhook(request: Request):
                     })
                     continue
                 try:
-                    items = [OrderItem(**it) for it in items_data]
+                    items = [OrderItem(**_normalize_item_from_vapi(it)) for it in items_data]
                     order = _process_place_order(items, params.get("special_requests"))
                     results.append({
                         "name": "place_order",
