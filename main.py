@@ -27,6 +27,9 @@ VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "")
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN", "")
+VONAGE_API_KEY = os.getenv("VONAGE_API_KEY", "")
+VONAGE_API_SECRET = os.getenv("VONAGE_API_SECRET", "")
+VONAGE_FROM_NUMBER = os.getenv("VONAGE_FROM_NUMBER", "")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 
@@ -223,6 +226,65 @@ def send_pushover_notification(order: Order):
             return False
     return False
 
+def _format_order_sms(order: Order) -> str:
+    """Formatera beställning till SMS-text enligt spec."""
+    lines = ["Hej! Detta är din orderbekräftelse från Gisslegrillen 🍕", ""]
+    for item in order.items:
+        part = f"{item.quantity}x {item.name}"
+        if item.special_requests and item.special_requests.strip():
+            part += f" {item.special_requests.strip()}"
+        lines.append(part)
+    lines.extend(["", "Är din beställning felaktig? Ring oss: +46760445700"])
+    return "\n".join(lines)
+
+def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
+    """
+    Skicka SMS-orderbekräftelse via Vonage.
+    Returnerar True vid lyckat skickande, False annars.
+    Blockerar ALDRIG – fel loggas men kastas inte.
+    """
+    if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
+        print("⚠️  Vonage not configured. Skipping SMS.")
+        return False
+    if not to_number or not str(to_number).strip():
+        print("⚠️  No customer phone number. Skipping SMS.")
+        return False
+    to = str(to_number).strip().replace(" ", "").replace("-", "")
+    if not to.startswith("+"):
+        to = ("+46" + to[1:]) if to.startswith("0") and len(to) > 1 else "+" + to
+    text = _format_order_sms(order)
+    try:
+        r = requests.post(
+            "https://rest.nexmo.com/sms/json",
+            data={
+                "api_key": VONAGE_API_KEY,
+                "api_secret": VONAGE_API_SECRET,
+                "from": VONAGE_FROM_NUMBER,
+                "to": to,
+                "text": text,
+            },
+            timeout=10,
+        )
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        msgs = data.get("messages") or []
+        if msgs and msgs[0].get("status") == "0":
+            print(f"✅ SMS orderbekräftelse skickad till {to} (order {order.order_id})")
+            return True
+        err = (msgs[0].get("error-text") if msgs else None) or r.text
+        print(f"⚠️  Vonage SMS FAILED: {err}")
+        return False
+    except Exception as e:
+        print(f"⚠️  Vonage SMS error: {e}")
+        return False
+
+def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
+    """Hämta kundens telefonnummer från Vapi webhook-payload."""
+    msg = body.get("message") or {}
+    # message.call.customer.number (user-specified path)
+    call = msg.get("call") or {}
+    customer = call.get("customer") or msg.get("customer") or {}
+    return customer.get("number") or customer.get("phone")
+
 # ==================== API ENDPOINTS ====================
 
 @app.get("/")
@@ -383,6 +445,12 @@ async def place_order(request: Request):
                                 "total_price": order.total_price
                             })
                         })
+                        try:
+                            customer_phone = _get_customer_phone_from_webhook(body)
+                            if customer_phone:
+                                send_sms_order_confirmation(order, customer_phone)
+                        except Exception as sms_err:
+                            print(f"⚠️  SMS-orderbekräftelse misslyckades: {sms_err}")
                     except Exception as e:
                         results.append({
                             "name": "place_order",
@@ -549,6 +617,15 @@ async def vapi_webhook(request: Request):
                         "result": json.dumps({"success": True, "order_id": order.order_id})
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id}")
+                    # Skicka SMS-orderbekräftelse – blockar inte svaret till Vapi
+                    try:
+                        customer_phone = _get_customer_phone_from_webhook(body)
+                        if customer_phone:
+                            send_sms_order_confirmation(order, customer_phone)
+                        else:
+                            print("⚠️  Ingen kundtelefon i webhook – SMS ej skickat")
+                    except Exception as sms_err:
+                        print(f"⚠️  SMS-orderbekräftelse misslyckades (påverkar inte order): {sms_err}")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
                     results.append({
