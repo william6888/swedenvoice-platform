@@ -617,6 +617,9 @@ async def vapi_webhook(request: Request):
     """
     try:
         body = await request.json()
+        print(f"FULL BODY KEYS: {json.dumps(list(body.keys()))}")
+        print(f"MESSAGE TYPE: {body.get('message') and body['message'].get('type')}")
+
         msg = body.get("message", {})
         event_type = msg.get("type", "unknown")
 
@@ -653,6 +656,7 @@ async def vapi_webhook(request: Request):
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id}")
                     # Skicka SMS-orderbekräftelse – blockar inte svaret till Vapi
+                    print("DEBUG SMS: Når SMS-kod – försöker hämta customer_phone")
                     try:
                         customer_phone = _get_customer_phone_from_webhook(body)
                         print(f"DEBUG SMS: Sending SMS to: {customer_phone}")
