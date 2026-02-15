@@ -298,6 +298,15 @@ def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
 
 # ==================== API ENDPOINTS ====================
 
+@app.get("/debug-vonage")
+async def debug_vonage():
+    """DEBUG: Kontrollera om Vonage env-variabler är satta (visar inte värden)."""
+    return {
+        "VONAGE_API_KEY": "SET" if VONAGE_API_KEY else "MISSING",
+        "VONAGE_API_SECRET": "SET" if VONAGE_API_SECRET else "MISSING",
+        "VONAGE_FROM_NUMBER": "SET" if VONAGE_FROM_NUMBER else "MISSING",
+    }
+
 @app.get("/")
 async def root():
     """Root endpoint - API info"""
@@ -426,6 +435,12 @@ async def place_order(request: Request):
         print("\n" + "="*50)
         print("📥 PLACE_ORDER ANROPAD! (från Vapi Tool URL eller direkt)")
         print("="*50)
+        print(f"DEBUG: body keys={list(body.keys())}")
+        if isinstance(body.get("message"), dict):
+            m = body["message"]
+            print(f"DEBUG: body.message keys={list(m.keys())}, has call={bool(m.get('call'))}")
+            if m.get("call"):
+                print(f"DEBUG: body.message.call keys={list(m['call'].keys())}, has customer={bool(m['call'].get('customer'))}")
         print(f"Body (första 800 tecken): {json.dumps(body, indent=2, ensure_ascii=False)[:800]}")
 
         # Vapi tool-calls format: toolCallList (nytt) eller toolWithToolCallList (gammalt)
@@ -458,8 +473,12 @@ async def place_order(request: Request):
                         })
                         try:
                             customer_phone = _get_customer_phone_from_webhook(body)
+                            print(f"DEBUG SMS [/place_order]: Sending SMS to: {customer_phone}")
                             if customer_phone:
-                                send_sms_order_confirmation(order, customer_phone)
+                                sms_result = send_sms_order_confirmation(order, customer_phone)
+                                print(f"DEBUG SMS [/place_order]: SMS result: {sms_result}")
+                            else:
+                                print("DEBUG SMS [/place_order]: Ingen kundtelefon – SMS ej skickat")
                         except Exception as sms_err:
                             print(f"⚠️  SMS-orderbekräftelse misslyckades: {sms_err}")
                     except Exception as e:
