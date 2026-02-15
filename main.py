@@ -655,14 +655,17 @@ async def vapi_webhook(request: Request):
                         "result": json.dumps({"success": True, "order_id": order.order_id})
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id}")
+                    print("=== SMS CHECKPOINT 1 ===")
                     # Skicka SMS-orderbekräftelse – blockar inte svaret till Vapi
                     print("DEBUG SMS: Når SMS-kod – försöker hämta customer_phone")
                     try:
                         customer_phone = _get_customer_phone_from_webhook(body)
+                        print("=== SMS CHECKPOINT 2 ===")
                         print(f"DEBUG SMS: Sending SMS to: {customer_phone}")
                         if customer_phone:
+                            print("=== SMS CHECKPOINT 3 (innan Vonage-anrop) ===")
                             sms_result = send_sms_order_confirmation(order, customer_phone)
-                            print(f"DEBUG SMS: SMS result: {sms_result}")
+                            print(f"=== SMS CHECKPOINT 4 (efter Vonage): result={sms_result} ===")
                         else:
                             print("⚠️  Ingen kundtelefon i webhook – SMS ej skickat")
                     except Exception as sms_err:
