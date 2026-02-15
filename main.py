@@ -5,6 +5,7 @@ FastAPI backend for Vapi.ai integration with Groq LLM
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
@@ -118,9 +119,10 @@ def calculate_total_price(items: List[OrderItem]) -> float:
     return total
 
 def generate_order_id() -> str:
-    """Generate unique order ID"""
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"ORD-{timestamp}"
+    """Generate unique order ID (undviker kollision vid flera orders/samme sekund)"""
+    import random
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    return f"ORD-{ts}-{random.randint(100, 999)}"
 
 def print_kitchen_ticket(order: Order):
     """Print a beautiful kitchen ticket to console"""
@@ -147,43 +149,55 @@ def send_pushover_notification(order: Order):
     if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
         print("⚠️  Pushover credentials not configured. Skipping notification.")
         return False
-    
-    try:
-        message = f"🔔 Ny beställning!\n\n"
-        message += f"Order: {order.order_id}\n"
-        message += f"Tid: {order.timestamp}\n\n"
-        
-        for item in order.items:
-            message += f"• {item.quantity}x {item.name}\n"
-        
-        if order.special_requests:
-            message += f"\n⚠️ Special: {order.special_requests}\n"
-        
-        message += f"\nTotalt: {order.total_price} kr"
-        
-        response = requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={
-                "token": PUSHOVER_API_TOKEN,
-                "user": PUSHOVER_USER_KEY,
-                "title": "Gislegrillen - Ny Order",
-                "message": message,
-                "priority": 1,
-                "sound": "cashregister"
-            },
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            print("✅ Pushover notification sent successfully!")
-            return True
-        else:
-            print(f"⚠️  Pushover notification failed: {response.text}")
+
+    print(f"📤 Skickar Pushover-notis för order {order.order_id}...")
+    message = f"🔔 Ny beställning!\n\n"
+    message += f"Order: {order.order_id}\n"
+    message += f"Tid: {order.timestamp}\n\n"
+    for item in order.items:
+        message += f"• {item.quantity}x {item.name}\n"
+    if order.special_requests:
+        message += f"\n⚠️ Special: {order.special_requests}\n"
+    message += f"\nTotalt: {order.total_price} kr"
+
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                "https://api.pushover.net/1/messages.json",
+                data={
+                    "token": PUSHOVER_API_TOKEN,
+                    "user": PUSHOVER_USER_KEY,
+                    "title": "Gislegrillen - Ny Order",
+                    "message": message,
+                    "priority": 1,
+                    "sound": "cashregister"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                print("✅ Pushover notification sent successfully!")
+                return True
+            err = response.text
+            print(f"⚠️  Pushover FAILED (HTTP {response.status_code}): {err}")
+            try:
+                err_json = response.json()
+                if "errors" in err_json:
+                    print(f"   Pushover errors: {err_json['errors']}")
+                if "limit" in err.lower() or "rate" in err.lower():
+                    print("   💡 Tip: Pushover har månadsgräns (10 000/mån). Kolla pushover.net")
+            except Exception:
+                pass
+            if attempt == 0:
+                time.sleep(1)
+                continue
             return False
-            
-    except Exception as e:
-        print(f"❌ Error sending Pushover notification: {e}")
-        return False
+        except Exception as e:
+            print(f"❌ Pushover-fel: {e}")
+            if attempt == 0:
+                time.sleep(1)
+                continue
+            return False
+    return False
 
 # ==================== API ENDPOINTS ====================
 
@@ -214,65 +228,148 @@ async def get_orders():
     orders = load_orders()
     return JSONResponse(content=orders)
 
-@app.post("/place_order")
-async def place_order(request: PlaceOrderRequest):
+def _extract_vapi_tool_calls(msg: dict) -> list:
     """
-    Main order placement endpoint - Called by Vapi tool
-    
-    This function:
-    1. Validates and calculates prices
-    2. Saves order to orders.json
-    3. Prints kitchen ticket to console
-    4. Sends Pushover notification
+    Extrahera place_order-anrop från Vapi-format.
+    Stödjer: toolCalls, toolCallList, toolWithToolCallList.
+    DEDUPLICERAR – Vapi skickar ofta samma anrop i både toolCalls OCH toolCallList.
+    Returnerar lista med (tool_call_id, params_dict).
+    """
+    seen_ids = set()
+    out = []
+    def _add_from_tc(tc):
+        cid = tc.get("id", "unknown")
+        if cid in seen_ids:
+            return
+        fn = tc.get("function") or tc
+        name = fn.get("name") or tc.get("name")
+        if name != "place_order":
+            return
+        args = fn.get("arguments") or fn.get("parameters") or tc.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        seen_ids.add(cid)
+        out.append((cid, args))
+
+    # Vapi skickar toolCalls (id, type, function.name, function.arguments)
+    for tc in msg.get("toolCalls", []):
+        _add_from_tc(tc)
+    # toolCallList (nytt 2025)
+    for tc in msg.get("toolCallList", []):
+        _add_from_tc(tc)
+    # Gammalt: toolWithToolCallList
+    for t in msg.get("toolWithToolCallList", []):
+        if t.get("name") != "place_order":
+            continue
+        tc = t.get("toolCall", {})
+        cid = tc.get("id", "unknown")
+        if cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+        out.append((cid, tc.get("parameters", {})))
+    return out
+
+
+def _process_place_order(items: List[OrderItem], special_requests: Optional[str] = None) -> Order:
+    """Process order: validate, save, print, send Pushover. Returns Order."""
+    enriched_items = []
+    for item in items:
+        menu_item = find_menu_item(item.id)
+        if not menu_item:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Menu item with ID {item.id} not found"
+            )
+        enriched_items.append(OrderItem(
+            id=item.id,
+            name=menu_item['name'],  # Alltid rätt namn från menyn, inte AI:ns gissning
+            quantity=item.quantity,
+            price=menu_item['price']
+        ))
+    total_price = calculate_total_price(enriched_items)
+    order = Order(
+        order_id=generate_order_id(),
+        items=enriched_items,
+        special_requests=special_requests,
+        total_price=total_price,
+        status="pending",
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+    orders = load_orders()
+    orders.append(order.model_dump())
+    save_orders(orders)
+    print_kitchen_ticket(order)
+    send_pushover_notification(order)
+    return order
+
+
+@app.post("/place_order")
+async def place_order(request: Request):
+    """
+    Main order placement endpoint - Called by Vapi tool OR direct API.
+    Supports both Vapi tool-calls format and direct JSON format.
     """
     try:
-        # Enrich items with prices from menu
-        enriched_items = []
-        for item in request.items:
-            menu_item = find_menu_item(item.id)
-            if not menu_item:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Menu item with ID {item.id} not found"
-                )
-            
-            enriched_items.append(OrderItem(
-                id=item.id,
-                name=item.name,
-                quantity=item.quantity,
-                price=menu_item['price']
-            ))
+        body = await request.json()
+        print("\n" + "="*50)
+        print("📥 PLACE_ORDER ANROPAD! (från Vapi Tool URL eller direkt)")
+        print("="*50)
+        print(f"Body (första 800 tecken): {json.dumps(body, indent=2, ensure_ascii=False)[:800]}")
+
+        # Vapi tool-calls format: toolCallList (nytt) eller toolWithToolCallList (gammalt)
+        if "message" in body and isinstance(body.get("message"), dict):
+            msg = body["message"]
+            has_tools = msg.get("toolCalls") or msg.get("toolCallList") or msg.get("toolWithToolCallList")
+            if (msg.get("type") == "tool-calls" or has_tools) and has_tools:
+                calls = _extract_vapi_tool_calls(msg)
+                results = []
+                for tool_call_id, params in calls:
+                    items_data = params.get("items", [])
+                    if not items_data:
+                        results.append({
+                            "name": "place_order",
+                            "toolCallId": tool_call_id,
+                            "result": json.dumps({"success": False, "error": "No items in order"})
+                        })
+                        continue
+                    try:
+                        items = [OrderItem(**it) for it in items_data]
+                        order = _process_place_order(items, params.get("special_requests"))
+                        results.append({
+                            "name": "place_order",
+                            "toolCallId": tool_call_id,
+                            "result": json.dumps({
+                                "success": True,
+                                "order_id": order.order_id,
+                                "total_price": order.total_price
+                            })
+                        })
+                    except Exception as e:
+                        results.append({
+                            "name": "place_order",
+                            "toolCallId": tool_call_id,
+                            "result": json.dumps({"success": False, "error": str(e)})
+                        })
+                if results:
+                    print(f"✅ Vapi tool-call processed, {len(results)} result(s)")
+                    return JSONResponse(content={"results": results})
+                print("⚠️  Body hade message/toolCalls men INGEN place_order hittades – kolla format!")
+                raise HTTPException(status_code=400, detail="No place_order tool call found")
         
-        # Calculate total
-        total_price = calculate_total_price(enriched_items)
-        
-        # Generate order
-        order = Order(
-            order_id=generate_order_id(),
-            items=enriched_items,
-            special_requests=request.special_requests,
-            total_price=total_price,
-            status="pending",
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-        
-        # Save to orders.json
-        orders = load_orders()
-        orders.append(order.model_dump())
-        save_orders(orders)
-        
-        # Print kitchen ticket
-        print_kitchen_ticket(order)
-        
-        # Send Pushover notification
-        send_pushover_notification(order)
-        
+        # Direct format: {"items": [...], "special_requests": "..."}
+        req = PlaceOrderRequest(**body)
+        order = _process_place_order(req.items, req.special_requests)
         return JSONResponse(content={
             "success": True,
             "message": "Order placed successfully",
             "order": order.model_dump()
         })
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error placing order: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -345,32 +442,93 @@ async def health_check():
         }
     })
 
+@app.get("/test_pushover")
+async def test_pushover():
+    """Test Pushover – skickar en testnotis för att verifiera konfiguration"""
+    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
+        return JSONResponse(content={
+            "success": False,
+            "error": "Pushover not configured (missing PUSHOVER_USER_KEY or PUSHOVER_API_TOKEN in .env)"
+        }, status_code=400)
+    try:
+        r = requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "token": PUSHOVER_API_TOKEN,
+                "user": PUSHOVER_USER_KEY,
+                "title": "Gislegrillen – Test",
+                "message": "Om du ser detta fungerar Pushover!",
+                "priority": 0
+            },
+            timeout=10
+        )
+        if r.status_code == 200:
+            return {"success": True, "message": "Testnotis skickad – kolla mobilen!"}
+        err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        return JSONResponse(
+            content={"success": False, "error": r.text, "pushover_errors": err.get("errors", [])},
+            status_code=400
+        )
+    except Exception as e:
+        return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
+
 # ==================== VAPI WEBHOOK ENDPOINTS ====================
 
 @app.post("/vapi/webhook")
 async def vapi_webhook(request: Request):
     """
-    Vapi webhook endpoint for call events
-    Handles: call started, ended, tool calls, etc.
+    Vapi webhook endpoint for call events.
+    Handles: call started, ended, tool-calls, etc.
+    If tool-calls arrive here (assistant-level URL), process place_order.
     """
     try:
         body = await request.json()
-        event_type = body.get("message", {}).get("type", "unknown")
+        msg = body.get("message", {})
+        event_type = msg.get("type", "unknown")
+
+        print("\n" + "-"*50)
+        print(f"📞 VAPI WEBHOOK: event_type={event_type}")
+        if event_type != "tool-calls":
+            print(f"   (Ignorerar – väntar på tool-calls för place_order)")
         
-        print(f"📞 Vapi Webhook Event: {event_type}")
-        print(f"   Data: {json.dumps(body, indent=2)}")
+        # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
+        if event_type == "tool-calls":
+            calls = _extract_vapi_tool_calls(msg)
+            results = []
+            for tool_call_id, params in calls:
+                items_data = params.get("items", [])
+                if not items_data:
+                    results.append({
+                        "name": "place_order",
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps({"success": False, "error": "No items"})
+                    })
+                    continue
+                try:
+                    items = [OrderItem(**it) for it in items_data]
+                    order = _process_place_order(items, params.get("special_requests"))
+                    results.append({
+                        "name": "place_order",
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps({"success": True, "order_id": order.order_id})
+                    })
+                    print(f"✅ Processed place_order via webhook: {order.order_id}")
+                except Exception as e:
+                    print(f"❌ place_order error in webhook: {e}")
+                    results.append({
+                        "name": "place_order",
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps({"success": False, "error": str(e)})
+                    })
+            if results:
+                return JSONResponse(content={"results": results})
         
-        return JSONResponse(content={
-            "success": True,
-            "event": event_type
-        })
+        print(f"   Event: {event_type}")
+        return JSONResponse(content={"success": True, "event": event_type})
         
     except Exception as e:
         print(f"❌ Vapi webhook error: {e}")
-        return JSONResponse(content={
-            "success": False,
-            "error": str(e)
-        }, status_code=500)
+        return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
 
 # ==================== SERVER STARTUP ====================
 

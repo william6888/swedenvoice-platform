@@ -7,34 +7,27 @@ STEG 1: Installera dependencies
 pip install -r requirements.txt
 
 
-STEG 2: Starta servern (Terminal 1)
-────────────────────────────────────
-./start_server.sh
+STEG 2: Deploya till Railway
+────────────────────────────
+Se RAILWAY_GUIDE.md – deploy via GitHub eller railway up
 
 
-STEG 3: Starta ngrok (Terminal 2)
-──────────────────────────────────
-./start_ngrok.sh
-
-→ Kopiera HTTPS-URL:en som visas!
-
-
-STEG 4: Uppdatera Vapi
-───────────────────────
+STEG 3: Uppdatera Vapi
+──────────────────────
 Gå till: https://vapi.ai/dashboard
-→ Din Assistant → Tools → place_order
-→ URL: https://DIN-NGROK-URL.ngrok-free.app/place_order
+→ Din Assistant → Advanced → Server Settings
+→ URL: https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook
 
 
-STEG 5: Testa!
-───────────────
+STEG 4: Testa!
+──────────────
 Ring ditt Vapi-nummer och beställ en pizza!
 
 ═══════════════════════════════════════════════════════════════
 
 📚 För mer information, läs:
+   • RAILWAY_GUIDE.md (deploy)
    • KOMPLETT_GUIDE.md (fullständig guide)
-   • STARTA_SYSTEMET.md (svensk guide)
    • VAPI_SETUP_GUIDE.md (Vapi-konfiguration)
 
 ═══════════════════════════════════════════════════════════════

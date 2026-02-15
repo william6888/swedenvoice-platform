@@ -4,18 +4,7 @@ This guide will help you configure Vapi.ai to work with your Gislegrillen Voice 
 
 ## Step 1: Expose Your Server
 
-### Option A: Using ngrok (for testing)
-
-```bash
-# Install ngrok from https://ngrok.com
-ngrok http 8000
-```
-
-You'll get a URL like: `https://abc123.ngrok.io`
-
-### Option B: Production Deployment
-
-Deploy to a server with a public domain and HTTPS (e.g., AWS, DigitalOcean, Heroku)
+Deploy to **Railway** (see RAILWAY_GUIDE.md). Railway gives you a stable HTTPS URL like `https://gislegrillen-production.up.railway.app`
 
 ## Step 2: Create Vapi Assistant
 
@@ -39,14 +28,26 @@ Deploy to a server with a public domain and HTTPS (e.g., AWS, DigitalOcean, Hero
 
 Copy and paste the ENTIRE contents of `system_prompt.md` into the system prompt field.
 
-### Voice Settings
+### Voice Settings (viktigt för naturlig svenska!)
 
-- **Provider:** ElevenLabs (or Play.ht)
+**Använd INTE Vapi's egna röster** – de har dålig svenska och låter robotiska. Välj en extern provider med riktig svenska:
+
+| Provider    | Rekommendation | Voice ID / Inställning |
+|------------|----------------|-------------------------|
+| **ElevenLabs** ✅ | **Jonas** – lugn, naturlig svensk man, bra för kundservice | `e6OiUVixGLmvtdn2GJYE` |
+| **ElevenLabs**   | **Jonas - Deep Swedish** – djupare röst | `Hyidyy6OA9R3GpDKGwoZ` |
+| **Play.ht**     | Bra svenska, 142 språk – välj svensk röst i Play.ht-listan | Välj "Swedish" i språkfilter i Vapi |
+| **Cartesia**    | Bra svenska, låg latens, emotion support | Välj Cartesia + svensk röst i Vapi |
+
+**Rekommenderade inställningar (ElevenLabs Jonas):**
+- **Provider:** ElevenLabs
+- **Voice ID:** `e6OiUVixGLmvtdn2GJYE` (Jonas)
 - **Language:** Swedish (sv-SE)
-- **Voice ID:** Choose a professional, friendly Swedish voice
 - **Speed:** 1.0
-- **Stability:** 0.5
+- **Stability:** 0.5–0.6 (högre = mindre robotkänsla, men kan bli mindre stabil)
 - **Similarity:** 0.75
+
+Du behöver en ElevenLabs API-nyckel (eller Play.ht/Cartesia) i Vapi – koppla under Assistant → Voice → Provider.
 
 ## Step 3: Configure the Tool
 
@@ -56,7 +57,7 @@ Add a **Server Tool** (Function Calling):
 
 **Name:** `place_order`
 
-**URL:** `https://your-domain.com/place_order` (or your ngrok URL)
+**URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook` (Server URL in Vapi Messaging)
 
 **Method:** POST
 
@@ -202,10 +203,12 @@ AI: [Calls place_order] "Tack för din beställning! Den är klar om 15 minuter.
     }'
   ```
 
-### AI speaks English instead of Swedish
+### AI speaks English instead of Swedish / sounds robotic or poor Swedish
+- **Switch from Vapi's default voices** to ElevenLabs (or Play.ht/Cartesia) and use a Swedish voice – see Voice Settings table above. Voice ID `e6OiUVixGLmvtdn2GJYE` (Jonas) is a good choice.
 - Double-check system prompt is in Swedish
-- Verify voice is set to Swedish (sv-SE)
+- Set **Language** to Swedish (sv-SE) for the voice
 - Check model temperature (should be 0.7)
+- In ElevenLabs: try **Stability** 0.5–0.6 for a less robotic tone
 
 ### Orders not appearing
 - Check console for errors

@@ -98,7 +98,7 @@ Add a server tool:
 
 **Tool Name:** `place_order`
 
-**Server URL:** `https://your-domain.com/place_order` (or use ngrok for testing)
+**Server URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook` (deploy via Railway, se RAILWAY_GUIDE.md)
 
 **Description:** "Place a customer order with items, quantities, and special requests"
 
@@ -198,13 +198,7 @@ STATUS: PENDING
 
 ### Testing Locally
 
-Use ngrok to expose your local server:
-
-```bash
-ngrok http 8000
-```
-
-Use the ngrok URL in Vapi tool configuration.
+Deploy to Railway (see RAILWAY_GUIDE.md) and use the Railway URL in Vapi.
 
 ### Adding Menu Items
 

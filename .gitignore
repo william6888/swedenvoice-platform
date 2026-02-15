@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Railway
+.railway
+railway.json
+
 # Python
 __pycache__/
 *.py[cod]

@@ -51,8 +51,7 @@ python main.py
 ### 3. Exponera servern
 
 ```bash
-# Installera ngrok från https://ngrok.com
-ngrok http 8000
+# Se RAILWAY_GUIDE.md för deploy till Railway
 ```
 
 ### 4. Konfigurera Vapi

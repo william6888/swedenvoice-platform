@@ -1,0 +1,17 @@
+---
+description: Gislegrillen project context – read PROJECT_CONTEXT.md for full knowledge
+alwaysApply: true
+---
+
+# Gislegrillen Order System – Kontext
+
+Detta projekt är **Gislegrillen Voice AI Order System**: FastAPI-backend, Vapi.ai (röst + Groq), Pushover, köksdashboard (index.html), menu.json, orders.json, system_prompt.md.
+
+**Vid hjälp i denna workspace:** Läs eller referera till **PROJECT_CONTEXT.md** i projektroten. Där finns:
+- Full lista över viktiga filer och deras roll
+- Branch: `cursor/gislegrillen-order-system-1e1d`
+- Teknisk stack (FastAPI, Vapi, ElevenLabs/Cartesia, Pushover)
+- Hur man kör servern och deployar till Railway
+- Var API-nycklar ligger (.env, aldrig committa)
+
+Använd PROJECT_CONTEXT.md som referens så att du inte behöver gissa eller be användaren upprepa vad som redan byggts.

@@ -74,11 +74,10 @@ Open your browser:
 ### 5. Expose to Internet (for Vapi)
 
 ```bash
-# Install ngrok from https://ngrok.com
-ngrok http 8000
+# Deploy to Railway - see RAILWAY_GUIDE.md
 ```
 
-Copy the HTTPS URL (e.g., `https://abc123.ngrok.io`)
+Copy your Railway URL (e.g., `https://gislegrillen-production.up.railway.app`)
 
 ### 6. Configure Vapi
 
@@ -88,7 +87,7 @@ Follow the detailed steps in `VAPI_SETUP_GUIDE.md`
 1. Create Assistant in Vapi
 2. Set Model: Groq → llama-3.1-70b-versatile
 3. Copy `system_prompt.md` content to System Prompt
-4. Add Tool: `place_order` pointing to your ngrok URL + `/place_order`
+4. Set Server URL: your Railway URL + `/vapi/webhook`
 5. Buy/assign phone number
 6. Test!
 

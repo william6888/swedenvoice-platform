@@ -72,26 +72,14 @@ Du ska nu se köksdashboarden!
 
 ---
 
-### Steg 4: Exponera servern till internet (för Vapi)
+### Steg 4: Deploya till Railway (för Vapi)
 
-Vapi behöver kunna nå din server från internet. Det enklaste sättet är med **ngrok**:
+Vapi behöver kunna nå din server från internet. **Deploya till Railway** enligt RAILWAY_GUIDE.md.
 
-#### Installera ngrok:
-
-```bash
-# Gå till https://ngrok.com och skapa ett konto
-# Ladda ner ngrok för ditt system
-# Installera och kör:
-
-ngrok http 8000
+Du får en stabil URL som t.ex.:
 ```
-
-Du får en URL som ser ut så här:
+https://gislegrillen-production.up.railway.app
 ```
-https://abc123xyz.ngrok-free.app
-```
-
-**Viktigt:** Spara denna URL! Du behöver den i nästa steg.
 
 ---
 
@@ -143,8 +131,7 @@ Fyll i:
 
 **Tool Name:** `place_order`
 
-**URL:** `https://din-ngrok-url.ngrok-free.app/place_order`
-(Byt ut `din-ngrok-url` med din riktiga ngrok-URL från Steg 4)
+**URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook`
 
 **Method:** POST
 
@@ -251,8 +238,8 @@ http://localhost:8000/dashboard - Beställningen syns där!
 ### Problem: "Connection refused" eller "Cannot connect to server"
 **Lösning:** 
 1. Kontrollera att servern körs (`python main.py`)
-2. Kontrollera att ngrok körs (`ngrok http 8000`)
-3. Uppdatera Tool URL i Vapi med den nya ngrok-URL:en
+2. Kontrollera att Railway-deploy är aktiv
+3. Uppdatera Server URL i Vapi med din Railway-URL
 
 ### Problem: AI pratar engelska istället för svenska
 **Lösning:**
@@ -290,7 +277,7 @@ När du är redo att köra systemet permanent:
 1. Skaffa en dator som kan köra 24/7
 2. Installera systemet där
 3. Använd en router med portforwarding (port 8000)
-4. Eller använd en tunnel-tjänst (ngrok pro, Cloudflare Tunnel)
+4. Deploya till Railway (rekommenderat, se RAILWAY_GUIDE.md)
 
 ---
 
@@ -300,7 +287,7 @@ När du är redo att köra systemet permanent:
 - [ ] Alla Python-paket installerade
 - [ ] Servern startar utan fel
 - [ ] Dashboard är tillgänglig på http://localhost:8000/dashboard
-- [ ] ngrok exponerar servern till internet
+- [ ] Railway-deploy aktiv
 - [ ] Vapi Assistant är skapad och konfigurerad
 - [ ] `system_prompt.md` är kopierad till Vapi
 - [ ] `place_order` tool är konfigurerad med rätt URL
@@ -321,8 +308,8 @@ python main.py
 # Testa systemet
 python test_system.py
 
-# Exponera till internet
-ngrok http 8000
+# Deploy till internet
+# Se RAILWAY_GUIDE.md
 
 # Se alla beställningar
 curl http://localhost:8000/orders | python -m json.tool

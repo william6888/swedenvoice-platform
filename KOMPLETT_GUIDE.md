@@ -4,8 +4,8 @@
 
 ```
 ┌─────────────┐    ┌──────────┐    ┌───────────┐    ┌──────────────┐    ┌──────────┐
-│   Kund      │───▶│  Vapi    │───▶│  ngrok    │───▶│   FastAPI    │───▶│ Pushover │
-│  (Röst)     │    │ (Röst-AI)│    │ (Tunnel)  │    │   Server     │    │ (Notis)  │
+│   Kund      │───▶│  Vapi    │───▶│ Railway   │───▶│   FastAPI    │───▶│ Pushover │
+│  (Röst)     │    │ (Röst-AI)│    │ (Moln)    │    │   Server     │    │ (Notis)  │
 └─────────────┘    └──────────┘    └───────────┘    └──────────────┘    └──────────┘
                         │                                     │
                         │                                     ├─▶ orders.json
@@ -18,7 +18,7 @@
 
 1. **Groq är redan integrerat** - AI:n använder Groq för att förstå beställningar
 2. **Pushover är konfigurerat** - Notiser skickas till din mobil
-3. **ngrok är nu installerat och konfigurerat** - Din authtoken är sparad
+3. **Railway** - Backend deployas till Railway (se RAILWAY_GUIDE.md)
 4. **Servern är redan byggd** - FastAPI med alla endpoints
 
 ## 🔍 Analys av din originalplan (Express vs FastAPI):
@@ -74,18 +74,11 @@ lsof -i :8000
 kill -9 $(lsof -t -i:8000)
 ```
 
-### Problem 3: ngrok URL ändras vid omstart
-**Potentiellt problem:** Gratis ngrok ger en ny URL varje gång du startar om.
-
-**Lösningar:**
-1. **Gratis:** Uppdatera Vapi-verktygets URL varje gång
-2. **Betalversion ($8/mån):** Få en permanent URL (domain)
-3. **Alternativ:** Använd en VPS med fast IP istället
+### Problem 3: Railway-URL
+**Lösning:** Railway ger en stabil URL (t.ex. `gislegrillen-production.up.railway.app`). Sätt den i Vapi en gång.
 
 ### Problem 4: Firewall/Säkerhet
-**Potentiellt problem:** Lokal firewall kan blockera inkommande requests.
-
-**Lösning:** ngrok hanterar detta automatiskt - det är därför vi använder det!
+**Lösning:** Railway kör i molnet – ingen lokal firewall påverkar.
 
 ### Problem 5: Vapi timeout
 **Potentiellt problem:** Om servern svarar långsamt kan Vapi timeout:a.
@@ -115,8 +108,7 @@ cd /workspace
 # Installera Python-dependencies (om inte redan gjort)
 pip install -r requirements.txt
 
-# Verifiera att ngrok är konfigurerat
-ngrok config check
+# Se RAILWAY_GUIDE.md för deploy
 ```
 
 ### Steg 2: Starta servern (Terminal 1)
@@ -150,44 +142,14 @@ Dashboard: http://localhost:8000/dashboard
 
 **Öppna dashboard:** http://localhost:8000/dashboard
 
-### Steg 3: Starta ngrok tunnel (Terminal 2)
+### Steg 3: Deploya till Railway
 
-**Öppna en NY terminal** och kör:
+Se **RAILWAY_GUIDE.md** för fullständiga instruktioner. Kort version:
+- Deploy via GitHub eller `railway up`
+- Generera en domän i Railway (Settings → Networking)
+- Du får t.ex. `https://gislegrillen-production.up.railway.app`
 
-```bash
-./start_ngrok.sh
-```
-
-**ELLER manuellt:**
-
-```bash
-ngrok http 8000
-```
-
-**Du får en output typ:**
-
-```
-ngrok
-
-Session Status                online
-Account                       Din email
-Version                       3.36.0
-Region                        Europe (eu)
-Latency                       23ms
-Web Interface                 http://127.0.0.1:4040
-Forwarding                    https://abc123xyz.ngrok-free.app -> http://localhost:8000
-
-Connections                   ttl     opn     rt1     rt5     p50     p90
-                              0       0       0.00    0.00    0.00    0.00
-```
-
-**KOPIERA DEN HTTPS-URL:en!** 
-Det är den du ska använda i Vapi. Exempel:
-```
-https://abc123xyz.ngrok-free.app
-```
-
-### Steg 4: Konfigurera Vapi (En gång per ngrok-omstart)
+### Steg 4: Konfigurera Vapi
 
 1. Gå till: https://vapi.ai/dashboard
 2. Gå till din Assistant → Tools
@@ -195,13 +157,10 @@ https://abc123xyz.ngrok-free.app
 4. Uppdatera URL:en till:
 
 ```
-https://DIN-NGROK-URL.ngrok-free.app/place_order
+https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook
 ```
 
-**Exempel:**
-```
-https://abc123xyz.ngrok-free.app/place_order
-```
+Server URL (Messaging) i Vapi Advanced.
 
 ### Steg 5: Testa hela kedjan
 
@@ -209,7 +168,7 @@ https://abc123xyz.ngrok-free.app/place_order
 
 ```bash
 # Öppna en tredje terminal
-curl -X POST https://DIN-NGROK-URL.ngrok-free.app/place_order \
+curl -X POST https://DIN-RAILWAY-URL.up.railway.app/place_order \
   -H "Content-Type: application/json" \
   -d '{
     "items": [
@@ -258,7 +217,7 @@ Kopiera HELA innehållet från filen `system_prompt.md`
 
 **Tool Type:** Server Tool (HTTP Request)
 
-**URL:** `https://DIN-NGROK-URL.ngrok-free.app/place_order`
+**URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook`
 
 **Method:** POST
 
@@ -311,12 +270,16 @@ Place a customer order with items, quantities, and special requests. Call this w
 }
 ```
 
-### C) Voice Settings
+### C) Voice Settings (naturlig svenska – inte robot!)
 
-- Provider: ElevenLabs
-- Language: Swedish (sv-SE)
-- Voice: Välj en professionell svensk röst (typ "Adam")
-- Speed: 1.0
+**Undvik Vapis egna röster** – de pratar dålig svenska. Använd ElevenLabs med svensk röst:
+
+- **Provider:** ElevenLabs (koppla din ElevenLabs API-nyckel i Vapi)
+- **Voice ID:** `e6OiUVixGLmvtdn2GJYE` (Jonas – lugn, naturlig svensk man)
+- **Alternativ:** `Hyidyy6OA9R3GpDKGwoZ` (Jonas Deep Swedish)
+- **Language:** Swedish (sv-SE)
+- **Speed:** 1.0
+- **Stability:** 0.5–0.6
 
 ## 🔧 Felsökning
 
@@ -333,27 +296,13 @@ kill -9 $(lsof -t -i:8000)
 ./start_server.sh
 ```
 
-### Problem: ngrok visar "ERR_NGROK_108"
-
-**Orsak:** Authtoken är felaktig eller saknas.
-
-**Lösning:**
-```bash
-ngrok config add-authtoken 39UZuyFGqXwHn47zGRb79LzWmEV_3WvUWvNAisZKsAWdj4WtB
-```
-
 ### Problem: Beställningen når inte servern
 
 **Debug-steg:**
 
-1. Kontrollera att servern körs:
+1. Kontrollera Railway:
 ```bash
-curl http://localhost:8000/health
-```
-
-2. Kontrollera att ngrok funkar:
-```bash
-curl https://DIN-NGROK-URL.ngrok-free.app/health
+curl https://DIN-RAILWAY-URL.up.railway.app/health
 ```
 
 3. Kontrollera Vapi-logs:
@@ -386,11 +335,6 @@ pip install -r requirements.txt --force-reinstall
 ### Real-time Dashboard
 http://localhost:8000/dashboard
 
-### ngrok Web Interface
-http://localhost:4040
-
-Detta visar alla requests som kommer genom ngrok - perfekt för debugging!
-
 ### Server Health Check
 ```bash
 curl http://localhost:8000/health
@@ -398,10 +342,8 @@ curl http://localhost:8000/health
 
 ## 🎯 Checklista innan första riktiga samtalet:
 
-- [ ] Server körs (`./start_server.sh`)
-- [ ] ngrok tunnel är aktiv (`./start_ngrok.sh`)
-- [ ] ngrok HTTPS-URL kopierad
-- [ ] Vapi Tool URL uppdaterad med ngrok-URL
+- [ ] Railway-deploy aktiv (se RAILWAY_GUIDE.md)
+- [ ] Vapi Server URL uppdaterad med Railway-URL
 - [ ] Pushover-appen installerad på mobilen
 - [ ] Testsamtal från curl fungerade
 - [ ] Dashboard visar beställningar
@@ -413,55 +355,27 @@ curl http://localhost:8000/health
 |--------|---------|-------|
 | Groq | Gratis | 30 req/min |
 | Pushover | 500 notiser gratis, sen $5 one-time | Obegränsat efter köp |
-| ngrok | Gratis | 1 tunnel, roterande URL |
+| Railway | $5/mån (Hobby) | Stabil URL, 24/7 |
 | Vapi | $10 gratis kredit | ~300 minuter samtal |
 
 ## 🚀 Produktionsdrift (för permanent användning)
 
 När du är redo att köra live:
 
-### Alternativ 1: ngrok Paid ($8/mån)
-- Permanent URL
-- Fler tunnlar
-- Bättre prestanda
-
-### Alternativ 2: VPS (DigitalOcean, AWS)
-- Deploya servern till en VPS
-- Få en riktig domän (gislegrillen.se)
-- Sätt upp HTTPS med Let's Encrypt
-- Ingen ngrok behövs
-
-### Alternativ 3: Heroku/Railway
-- Deploy med ett kommando
+### Railway (rekommenderat)
+- Deploy enligt RAILWAY_GUIDE.md
+- Stabil URL, 24/7
 - Automatisk HTTPS
-- $5-10/mån
 
 ## 📝 Daglig användning
 
-### Morgon (Starta systemet):
-
-Terminal 1:
-```bash
-cd /workspace
-./start_server.sh
-```
-
-Terminal 2:
-```bash
-cd /workspace
-./start_ngrok.sh
-```
-
-Kopiera ngrok-URL → Uppdatera Vapi
-
-### Kväll (Stäng ner):
-
-Tryck `Ctrl+C` i båda terminalerna
+### Med Railway:
+Inget att starta – appen körs 24/7 i molnet. Uppdatera Vapi-URL en gång efter deploy.
 
 ## 🆘 Support
 
 1. **Kolla server-logs** - De flesta fel syns där
-2. **Kolla ngrok web interface** - http://localhost:4040
+2. **Kolla Railway logs** - I Railway Dashboard
 3. **Kolla Vapi logs** - I deras dashboard
 4. **Testa med curl** - Isolera problemet
 5. **Läs felmeddelanden** - De är faktiskt hjälpsamma!
@@ -471,12 +385,12 @@ Tryck `Ctrl+C` i båda terminalerna
 ## ✅ Sammanfattning av det färdiga systemet:
 
 🔧 **Infrastruktur:**
-- ✅ ngrok installerat och konfigurerat
+- ✅ Railway-deploy (se RAILWAY_GUIDE.md)
 - ✅ FastAPI-server på port 8000
 - ✅ Startup-scripts skapade
 
 🔗 **Integration:**
-- ✅ Vapi → ngrok → FastAPI → Pushover
+- ✅ Vapi → Railway → FastAPI → Pushover
 - ✅ Groq AI för språkförståelse
 - ✅ JSON-validering och error handling
 
@@ -491,7 +405,7 @@ Tryck `Ctrl+C` i båda terminalerna
 - ✅ API-nycklar i .env (inte i git)
 - ✅ Input-validering
 - ✅ Error handling
-- ✅ HTTPS via ngrok
+- ✅ HTTPS via Railway
 
 ---
 
