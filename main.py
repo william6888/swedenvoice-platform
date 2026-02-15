@@ -55,6 +55,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_debug():
+    """DEBUG: Logga Vonage env vid app-start (körs också på Railway)."""
+    print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
+    print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
+    print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
+
 # ==================== DATA MODELS ====================
 
 class OrderItem(BaseModel):
@@ -246,6 +253,7 @@ def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
     if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
         print("⚠️  Vonage not configured. Skipping SMS.")
         return False
+    print(f"DEBUG SMS: Vonage config OK, calling API for to_number={to_number}")
     if not to_number or not str(to_number).strip():
         print("⚠️  No customer phone number. Skipping SMS.")
         return False
@@ -267,6 +275,7 @@ def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
         )
         data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         msgs = data.get("messages") or []
+        print(f"DEBUG SMS: Vonage API response status={r.status_code}, data={json.dumps(data, ensure_ascii=False)[:300]}")
         if msgs and msgs[0].get("status") == "0":
             print(f"✅ SMS orderbekräftelse skickad till {to} (order {order.order_id})")
             return True
@@ -280,10 +289,12 @@ def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
 def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
     """Hämta kundens telefonnummer från Vapi webhook-payload."""
     msg = body.get("message") or {}
-    # message.call.customer.number (user-specified path)
     call = msg.get("call") or {}
     customer = call.get("customer") or msg.get("customer") or {}
-    return customer.get("number") or customer.get("phone")
+    # Sökvägar: message.call.customer.number (primär), customer.phone, customer.phoneNumber
+    phone = customer.get("number") or customer.get("phone") or customer.get("phoneNumber")
+    print(f"DEBUG SMS: phone sökväg = message.call.customer.number|phone|phoneNumber -> found={phone}")
+    return phone
 
 # ==================== API ENDPOINTS ====================
 
@@ -597,6 +608,11 @@ async def vapi_webhook(request: Request):
         
         # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
         if event_type == "tool-calls":
+            # DEBUG: logga message.call struktur för att verifiera kundnummer-sökväg
+            msg_struct = body.get("message") or {}
+            call_data = msg_struct.get("call") or {}
+            cust_data = call_data.get("customer") or msg_struct.get("customer") or {}
+            print(f"DEBUG SMS: message.call keys={list(call_data.keys())}, customer keys={list(cust_data.keys())}")
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
@@ -620,8 +636,10 @@ async def vapi_webhook(request: Request):
                     # Skicka SMS-orderbekräftelse – blockar inte svaret till Vapi
                     try:
                         customer_phone = _get_customer_phone_from_webhook(body)
+                        print(f"DEBUG SMS: Sending SMS to: {customer_phone}")
                         if customer_phone:
-                            send_sms_order_confirmation(order, customer_phone)
+                            sms_result = send_sms_order_confirmation(order, customer_phone)
+                            print(f"DEBUG SMS: SMS result: {sms_result}")
                         else:
                             print("⚠️  Ingen kundtelefon i webhook – SMS ej skickat")
                     except Exception as sms_err:
@@ -677,6 +695,10 @@ if __name__ == "__main__":
         print("⚠️  WARNING: GROQ_API_KEY not configured!")
     if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
         print("⚠️  WARNING: Pushover credentials not configured!")
+    # DEBUG: Vonage env vars vid start
+    print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
+    print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
+    print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
     
     print("\n✅ Server ready to accept orders!\n")
     
