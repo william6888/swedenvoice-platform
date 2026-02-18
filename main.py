@@ -744,42 +744,12 @@ async def vapi_webhook(request: Request):
         print("\n" + "-"*50)
         print(f"📞 VAPI WEBHOOK: event_type={event_type}")
 
-        # Handle end-of-call-report (Supabase/KDS – structuredData + transcript)
+        # Handle end-of-call-report
+        # OBS: Vi skippar order-skapande här för att undvika DUBBLA Pushover/ordrar.
+        # tool-calls hanterar redan beställningen. end-of-call-report används bara som fallback
+        # om tool-calls aldrig når oss (t.ex. avbruten samtal) – men då saknas ofta data.
         if event_type == "end-of-call-report":
-            artifact = msg.get("artifact") or body.get("artifact") or {}
-            raw_transcript = artifact.get("transcript") or artifact.get("analysis") or str(artifact.get("transcript", ""))
-            if isinstance(raw_transcript, dict):
-                raw_transcript = raw_transcript.get("transcript", "") or json.dumps(raw_transcript)
-            structured = artifact.get("structuredData") or artifact.get("structured_data") or {}
-            maträtter = structured.get("maträtter") or structured.get("items") or structured.get("itemsList") or []
-            items_data = _parse_items_from_params({"items": maträtter}) if maträtter else []
-            if not items_data:
-                for m in (artifact.get("messages") or [])[::-1]:
-                    tc = m.get("toolCalls") or m.get("toolCallList") or m.get("toolWithToolCallList") or []
-                    for t in tc:
-                        p = t.get("parameters") or t.get("function", {}).get("arguments") or {}
-                        if isinstance(p, str):
-                            try:
-                                p = json.loads(p)
-                            except json.JSONDecodeError:
-                                p = {}
-                        items_data = _parse_items_from_params(p)
-                        if items_data:
-                            break
-                    if items_data:
-                        break
-            if items_data:
-                try:
-                    items = [OrderItem(**it) for it in items_data]
-                    order = _process_place_order(items, skip_pushover=False)
-                    restaurant_id = _get_restaurant_id_from_webhook(body)
-                    customer_phone = _get_customer_phone_from_webhook(body)
-                    _insert_order_to_supabase(order, restaurant_id, customer_phone=customer_phone, raw_transcript=raw_transcript or "")
-                    print(f"✅ end-of-call-report: order {order.order_id} sparad till Supabase")
-                except Exception as e:
-                    print(f"⚠️  end-of-call-report extract/insert failed: {e}")
-            else:
-                print("   (end-of-call-report: inga maträtter hittades – hoppar över Supabase)")
+            print("   (end-of-call-report: mottagen – order redan sparad via tool-calls)")
             return JSONResponse(content={"success": True, "event": "end-of-call-report"})
 
         # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
