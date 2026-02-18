@@ -49,7 +49,7 @@ Efter deploy: Settings → Networking → Generate Domain.
 
 ## 4. Sätt variabler i Railway
 
-I Railway Dashboard → ditt projekt → Variables, lägg till:
+I Railway Dashboard → ditt projekt → Variables, lägg till (kopiera från .env):
 
 | Variabel | Värde |
 |----------|-------|
@@ -57,6 +57,11 @@ I Railway Dashboard → ditt projekt → Variables, lägg till:
 | GROQ_API_KEY | (från .env) |
 | PUSHOVER_USER_KEY | (från .env) |
 | PUSHOVER_API_TOKEN | (från .env) |
+| SUPABASE_URL | (från .env) |
+| SUPABASE_KEY | (service_role JWT från .env) |
+| VONAGE_API_KEY | (från .env) |
+| VONAGE_API_SECRET | (från .env) |
+| VONAGE_FROM_NUMBER | (t.ex. +46790952699) |
 
 ## 5. Uppdatera Vapi
 

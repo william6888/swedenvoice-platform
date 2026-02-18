@@ -22,6 +22,21 @@ import uvicorn
 # Load environment variables
 load_dotenv()
 
+# Configuration (måste vara före Supabase-init)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+
+# Supabase client (optional – används för KDS/Lovable Dashboard)
+_supabase_client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        from supabase import create_client
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        key_preview = "eyJ... (JWT)" if SUPABASE_KEY.strip().startswith("eyJ") else "***"
+        print(f"✅ Supabase client initialized (key: {key_preview})")
+    except Exception as e:
+        print(f"⚠️  Supabase init failed: {e}")
+
 # Configuration
 VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -58,7 +73,7 @@ app.add_middleware(
 @app.middleware("http")
 async def log_post_path(request: Request, call_next):
     """Logga POST till place_order/webhook – spåra var tool-calls går."""
-    if request.method == "POST" and request.url.path in ("/place_order", "/vapi/webhook"):
+    if request.method == "POST" and request.url.path in ("/place_order", "/vapi/webhook", "/vapi-webhook"):
         print(f">>> INCOMING POST {request.url.path} <<<")
     return await call_next(request)
 
@@ -97,15 +112,16 @@ class UpdateOrderStatusRequest(BaseModel):
 # ==================== HELPER FUNCTIONS ====================
 
 def _parse_items_from_params(params: dict) -> list:
-    """Extrahera items från params – stödjer items, order.items, full_order.items."""
+    """Extrahera items från params – stödjer items, order.items, full_order.items, maträtter. Normaliserar itemId/qty."""
     items = params.get("items", [])
     if not items and "order" in params:
         items = params.get("order", {}).get("items", [])
     if not items and "full_order" in params:
         items = params.get("full_order", {}).get("items", [])
+    if not items and "maträtter" in params:
+        items = params.get("maträtter", [])
     if not isinstance(items, list):
         return []
-    # Unwrap { "item": {...} } och normalisera special_requests (snake_case + camelCase)
     out = []
     for it in items:
         if isinstance(it, dict) and "item" in it and isinstance(it.get("item"), dict):
@@ -114,8 +130,15 @@ def _parse_items_from_params(params: dict) -> list:
             d = dict(it)
         else:
             continue
+        if "itemId" in d and "id" not in d:
+            d["id"] = d.pop("itemId")
+        if "qty" in d and "quantity" not in d:
+            d["quantity"] = d.pop("qty")
         if "specialRequests" in d and "special_requests" not in d:
             d["special_requests"] = d.pop("specialRequests")
+        if "name" not in d and d.get("id") is not None:
+            mi = find_menu_item(int(d["id"]))
+            d["name"] = mi["name"] if mi else f"Artikel {d['id']}"
         out.append(d)
     return out
 
@@ -243,6 +266,48 @@ def send_pushover_notification(order: Order, customer_phone: Optional[str] = Non
             return False
     return False
 
+
+def _insert_order_to_supabase(
+    order: Order,
+    restaurant_id: str,
+    customer_name: Optional[str] = None,
+    customer_phone: Optional[str] = None,
+    raw_transcript: Optional[str] = None
+) -> bool:
+    """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert."""
+    if not _supabase_client:
+        return False
+    try:
+        items_json = [{"id": i.id, "name": i.name, "quantity": i.quantity, "price": i.price} for i in order.items]
+        row = {
+            "restaurant_id": restaurant_id or "default",
+            "customer_name": customer_name or "",
+            "customer_phone": customer_phone or "",
+            "items": items_json,
+            "total_price": float(order.total_price),
+            "status": "NYA",
+            "raw_transcript": raw_transcript or "",
+        }
+        resp = _supabase_client.table("orders").insert(row).execute()
+        # Detaljerad logg (Supabase AI-felsökning)
+        err = getattr(resp, "error", None)
+        data = getattr(resp, "data", None)
+        status_code = getattr(resp, "status_code", None)
+        auth_preview = "eyJ (JWT)" if SUPABASE_KEY and str(SUPABASE_KEY).strip().startswith("eyJ") else "annat"
+        print(f"SUPABASE RESP: status_code={status_code} | data={data} | error={err}")
+        if data is None and err is None:
+            print(f"SUPABASE RAW resp type: {type(resp).__name__}, attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
+        print(f"SUPABASE AUTH: {auth_preview}")
+        if err:
+            print(f"⚠️  Supabase insert FAILED: {err}")
+            return False
+        print(f"✅ Order {order.order_id} sparad till Supabase (restaurant_id={restaurant_id})")
+        return True
+    except Exception as e:
+        print(f"⚠️  Supabase insert failed: {e}")
+        return False
+
+
 def _format_order_sms(order: Order) -> str:
     """Formatera beställning till SMS-text enligt spec."""
     lines = ["Hej! Detta är din orderbekräftelse från Gislegrillen.", ""]
@@ -317,6 +382,20 @@ def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
     print(f"DEBUG SMS: phone sökväg -> found={phone}")
     return phone
 
+
+def _get_restaurant_id_from_webhook(body: dict) -> str:
+    """Hämta restaurant_id (assistantId) från Vapi webhook. Multi-tenancy."""
+    msg = body.get("message") or {}
+    call = msg.get("call") or body.get("call") or {}
+    aid = (
+        call.get("assistantId") or msg.get("assistantId")
+        or body.get("assistantId") or call.get("assistant") or msg.get("assistant")
+    )
+    if isinstance(aid, dict):
+        aid = aid.get("id") or aid.get("assistantId")
+    return str(aid).strip() if aid else "default"
+
+
 # ==================== API ENDPOINTS ====================
 
 @app.get("/debug-vonage")
@@ -370,14 +449,20 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
             return
         fn = tc.get("function") or tc
         name = fn.get("name") or tc.get("name")
-        if name != "place_order":
-            return
         args = fn.get("arguments") or fn.get("parameters") or tc.get("arguments") or {}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
+        # Acceptera place_order antingen med explicit name ELLER om params innehåller items (Vapi toolCallList kan sakna name)
+        is_place_order = name == "place_order"
+        if not is_place_order and isinstance(args, dict):
+            items = args.get("items") or args.get("order", {}).get("items") or args.get("full_order", {}).get("items")
+            if isinstance(items, list) and len(items) > 0:
+                is_place_order = True
+        if not is_place_order:
+            return
         seen_ids.add(cid)
         out.append((cid, args))
 
@@ -489,6 +574,9 @@ async def place_order(request: Request):
                         items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                         send_pushover_notification(order, customer_phone=customer_phone)
+                        restaurant_id = _get_restaurant_id_from_webhook(body)
+                        customer_name = params.get("customer_name") or params.get("customerName") or ""
+                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone)
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
@@ -637,6 +725,7 @@ async def test_pushover():
 # ==================== VAPI WEBHOOK ENDPOINTS ====================
 
 @app.post("/vapi/webhook")
+@app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
     """
     Vapi webhook endpoint for call events.
@@ -654,9 +743,45 @@ async def vapi_webhook(request: Request):
 
         print("\n" + "-"*50)
         print(f"📞 VAPI WEBHOOK: event_type={event_type}")
-        if event_type != "tool-calls":
-            print(f"   (Ignorerar – väntar på tool-calls för place_order)")
-        
+
+        # Handle end-of-call-report (Supabase/KDS – structuredData + transcript)
+        if event_type == "end-of-call-report":
+            artifact = msg.get("artifact") or body.get("artifact") or {}
+            raw_transcript = artifact.get("transcript") or artifact.get("analysis") or str(artifact.get("transcript", ""))
+            if isinstance(raw_transcript, dict):
+                raw_transcript = raw_transcript.get("transcript", "") or json.dumps(raw_transcript)
+            structured = artifact.get("structuredData") or artifact.get("structured_data") or {}
+            maträtter = structured.get("maträtter") or structured.get("items") or structured.get("itemsList") or []
+            items_data = _parse_items_from_params({"items": maträtter}) if maträtter else []
+            if not items_data:
+                for m in (artifact.get("messages") or [])[::-1]:
+                    tc = m.get("toolCalls") or m.get("toolCallList") or m.get("toolWithToolCallList") or []
+                    for t in tc:
+                        p = t.get("parameters") or t.get("function", {}).get("arguments") or {}
+                        if isinstance(p, str):
+                            try:
+                                p = json.loads(p)
+                            except json.JSONDecodeError:
+                                p = {}
+                        items_data = _parse_items_from_params(p)
+                        if items_data:
+                            break
+                    if items_data:
+                        break
+            if items_data:
+                try:
+                    items = [OrderItem(**it) for it in items_data]
+                    order = _process_place_order(items, skip_pushover=False)
+                    restaurant_id = _get_restaurant_id_from_webhook(body)
+                    customer_phone = _get_customer_phone_from_webhook(body)
+                    _insert_order_to_supabase(order, restaurant_id, customer_phone=customer_phone, raw_transcript=raw_transcript or "")
+                    print(f"✅ end-of-call-report: order {order.order_id} sparad till Supabase")
+                except Exception as e:
+                    print(f"⚠️  end-of-call-report extract/insert failed: {e}")
+            else:
+                print("   (end-of-call-report: inga maträtter hittades – hoppar över Supabase)")
+            return JSONResponse(content={"success": True, "event": "end-of-call-report"})
+
         # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
         if event_type == "tool-calls":
             # DEBUG: logga message.call struktur för att verifiera kundnummer-sökväg
@@ -680,6 +805,9 @@ async def vapi_webhook(request: Request):
                     items = [OrderItem(**it) for it in items_data]
                     order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                     send_pushover_notification(order, customer_phone=customer_phone)
+                    restaurant_id = _get_restaurant_id_from_webhook(body)
+                    customer_name = params.get("customer_name") or params.get("customerName") or ""
+                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone)
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
@@ -750,6 +878,8 @@ if __name__ == "__main__":
         print("⚠️  WARNING: GROQ_API_KEY not configured!")
     if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
         print("⚠️  WARNING: Pushover credentials not configured!")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("⚠️  Supabase not configured (KDS/Lovable) – orders will not sync to Supabase")
     # DEBUG: Vonage env vars vid start
     print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
