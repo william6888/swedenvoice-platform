@@ -384,16 +384,9 @@ def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
 
 
 def _get_restaurant_id_from_webhook(body: dict) -> str:
-    """Hämta restaurant_id (assistantId) från Vapi webhook. Multi-tenancy."""
-    msg = body.get("message") or {}
-    call = msg.get("call") or body.get("call") or {}
-    aid = (
-        call.get("assistantId") or msg.get("assistantId")
-        or body.get("assistantId") or call.get("assistant") or msg.get("assistant")
-    )
-    if isinstance(aid, dict):
-        aid = aid.get("id") or aid.get("assistantId")
-    return str(aid).strip() if aid else "default"
+    """Hämta restaurant_id för Supabase. En-restaurant: alltid Gislegrillen_01.
+    Vapi skickar assistantId som UUID – Lovable filtrerar på Gislegrillen_01."""
+    return "Gislegrillen_01"
 
 
 # ==================== API ENDPOINTS ====================
