@@ -185,16 +185,19 @@ def print_kitchen_ticket(order: Order):
     print(f"STATUS: {order.status.upper()}")
     print("="*60 + "\n")
 
-def send_pushover_notification(order: Order):
-    """Send push notification via Pushover API"""
+def send_pushover_notification(order: Order, customer_phone: Optional[str] = None):
+    """Send push notification via Pushover API. Inkluderar kundens telefon om angiven."""
     if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
         print("⚠️  Pushover credentials not configured. Skipping notification.")
         return False
 
-    print(f"📤 Skickar Pushover-notis för order {order.order_id}...")
+    print(f"📤 Skickar Pushover-notis för order {order.order_id}... (customer_phone={customer_phone})")
     message = f"🔔 Ny beställning!\n\n"
     message += f"Order: {order.order_id}\n"
-    message += f"Tid: {order.timestamp}\n\n"
+    message += f"Tid: {order.timestamp}\n"
+    if customer_phone:
+        message += f"Telefon: {customer_phone}\n"
+    message += "\n"
     for item in order.items:
         message += f"• {item.quantity}x {item.name}\n"
     if order.special_requests:
@@ -242,7 +245,7 @@ def send_pushover_notification(order: Order):
 
 def _format_order_sms(order: Order) -> str:
     """Formatera beställning till SMS-text enligt spec."""
-    lines = ["Hej! Detta är din orderbekräftelse från Gisslegrillen 🍕", ""]
+    lines = ["Hej! Detta är din orderbekräftelse från Gislegrillen.", ""]
     for item in order.items:
         part = f"{item.quantity}x {item.name}"
         if item.special_requests and item.special_requests.strip():
@@ -288,19 +291,30 @@ def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
             return True
         err = (msgs[0].get("error-text") if msgs else None) or r.text
         print(f"⚠️  Vonage SMS FAILED: {err}")
+        if "Bad Credentials" in str(err):
+            print("   → Kolla VONAGE_API_KEY och VONAGE_API_SECRET i Railway Variables. Kopiera exakt från Vonage Dashboard.")
+        elif "invalid" in str(err).lower() or "from" in str(err).lower():
+            print("   → VONAGE_FROM_NUMBER måste vara ett nummer du äger i Vonage (t.ex. virtuellt nummer). Format: +46701234567")
         return False
     except Exception as e:
         print(f"⚠️  Vonage SMS error: {e}")
         return False
 
 def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
-    """Hämta kundens telefonnummer från Vapi webhook-payload."""
+    """Hämta kundens telefonnummer från Vapi webhook-payload.
+    Söker i: message.call.customer.number, body.phoneNumber, call.customer.number, m.fl."""
     msg = body.get("message") or {}
-    call = msg.get("call") or {}
-    customer = call.get("customer") or msg.get("customer") or {}
-    # Sökvägar: message.call.customer.number (primär), customer.phone, customer.phoneNumber
-    phone = customer.get("number") or customer.get("phone") or customer.get("phoneNumber")
-    print(f"DEBUG SMS: phone sökväg = message.call.customer.number|phone|phoneNumber -> found={phone}")
+    call = msg.get("call") or body.get("call") or {}
+    customer = call.get("customer") or msg.get("customer") or body.get("customer") or {}
+    phone = (
+        customer.get("number") or customer.get("phone") or customer.get("phoneNumber")
+        or call.get("customerNumber") or call.get("phoneNumber") or call.get("from") or call.get("to")
+        or msg.get("customerNumber") or msg.get("phoneNumber")
+        or body.get("phoneNumber") or body.get("customerNumber")
+    )
+    if phone:
+        phone = str(phone).strip()
+    print(f"DEBUG SMS: phone sökväg -> found={phone}")
     return phone
 
 # ==================== API ENDPOINTS ====================
@@ -392,8 +406,9 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
     return out
 
 
-def _process_place_order(items: List[OrderItem], special_requests: Optional[str] = None) -> Order:
-    """Process order: validate, save, print, send Pushover. Returns Order."""
+def _process_place_order(items: List[OrderItem], special_requests: Optional[str] = None, customer_phone: Optional[str] = None, skip_pushover: bool = False) -> Order:
+    """Process order: validate, save, print, send Pushover (om inte skip_pushover).
+    customer_phone inkluderas i Pushover när angiven. Callers med body kan anropa send_pushover själva efteråt med telefon."""
     enriched_items = []
     per_item_specs = []
     for item in items:
@@ -427,7 +442,8 @@ def _process_place_order(items: List[OrderItem], special_requests: Optional[str]
     orders.append(order.model_dump())
     save_orders(orders)
     print_kitchen_ticket(order)
-    send_pushover_notification(order)
+    if not skip_pushover:
+        send_pushover_notification(order, customer_phone=customer_phone)
     return order
 
 
@@ -457,6 +473,7 @@ async def place_order(request: Request):
             msg = body["message"]
             has_tools = msg.get("toolCalls") or msg.get("toolCallList") or msg.get("toolWithToolCallList")
             if (msg.get("type") == "tool-calls" or has_tools) and has_tools:
+                customer_phone = _get_customer_phone_from_webhook(body)
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
                 for tool_call_id, params in calls:
@@ -470,7 +487,8 @@ async def place_order(request: Request):
                         continue
                     try:
                         items = [OrderItem(**it) for it in items_data]
-                        order = _process_place_order(items, params.get("special_requests"))
+                        order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
+                        send_pushover_notification(order, customer_phone=customer_phone)
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
@@ -481,7 +499,6 @@ async def place_order(request: Request):
                             })
                         })
                         try:
-                            customer_phone = _get_customer_phone_from_webhook(body)
                             print("=== SMS CHECKPOINT A (i /place_order) ===")
                             print(f"DEBUG SMS [/place_order]: Sending SMS to: {customer_phone}")
                             if customer_phone:
@@ -628,6 +645,7 @@ async def vapi_webhook(request: Request):
     """
     try:
         body = await request.json()
+        print(f">>> RAW INCOMING: path=/vapi/webhook, content_length={request.headers.get('content-length')}, type={body.get('message', {}).get('type')}")
         print(f"FULL BODY KEYS: {json.dumps(list(body.keys()))}")
         print(f"MESSAGE TYPE: {body.get('message') and body['message'].get('type')}")
 
@@ -646,6 +664,7 @@ async def vapi_webhook(request: Request):
             call_data = msg_struct.get("call") or {}
             cust_data = call_data.get("customer") or msg_struct.get("customer") or {}
             print(f"DEBUG SMS: message.call keys={list(call_data.keys())}, customer keys={list(cust_data.keys())}")
+            customer_phone = _get_customer_phone_from_webhook(body)
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
@@ -659,7 +678,8 @@ async def vapi_webhook(request: Request):
                     continue
                 try:
                     items = [OrderItem(**it) for it in items_data]
-                    order = _process_place_order(items, params.get("special_requests"))
+                    order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
+                    send_pushover_notification(order, customer_phone=customer_phone)
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
@@ -667,10 +687,7 @@ async def vapi_webhook(request: Request):
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id}")
                     print("=== SMS CHECKPOINT 1 ===")
-                    # Skicka SMS-orderbekräftelse – blockar inte svaret till Vapi
-                    print("DEBUG SMS: Når SMS-kod – försöker hämta customer_phone")
                     try:
-                        customer_phone = _get_customer_phone_from_webhook(body)
                         print("=== SMS CHECKPOINT 2 ===")
                         print(f"DEBUG SMS: Sending SMS to: {customer_phone}")
                         if customer_phone:
@@ -679,6 +696,7 @@ async def vapi_webhook(request: Request):
                             print(f"=== SMS CHECKPOINT 4 (efter Vonage): result={sms_result} ===")
                         else:
                             print("⚠️  Ingen kundtelefon i webhook – SMS ej skickat")
+                            print("   → Vapi skickar kanske inte caller-nummer i tool-calls. Kolla DEBUG SMS-raden ovan för payload-struktur.")
                     except Exception as sms_err:
                         print(f"⚠️  SMS-orderbekräftelse misslyckades (påverkar inte order): {sms_err}")
                 except Exception as e:
