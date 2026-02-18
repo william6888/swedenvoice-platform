@@ -88,5 +88,33 @@
     {"id": 73, "name": "Wärdshusschnitzel", "price": 125, "description": "Sallad, tomat, gurka, aromsmör, strips"},
     {"id": 74, "name": "Stor snitzare i bröd", "price": 115, "description": "Bröd, ost, paprika, citronpeppar"},
     {"id": 75, "name": "Stor snitzare med strips", "price": 115, "description": "Bröd, ost, paprika, citronpeppar"}
+  ],
+  "hamburgare": [
+    {"id": 77, "name": "90g i bröd", "price": 65, "description": "90g hamburgare i bröd"},
+    {"id": 78, "name": "90g tallrik", "price": 95, "description": "90g hamburgare med strips eller mos"},
+    {"id": 79, "name": "150g i bröd", "price": 75, "description": "150g hamburgare i bröd"},
+    {"id": 80, "name": "150g tallrik", "price": 105, "description": "150g hamburgare med strips eller mos"},
+    {"id": 81, "name": "200g i bröd", "price": 85, "description": "200g hamburgare i bröd"},
+    {"id": 82, "name": "200g tallrik", "price": 115, "description": "200g hamburgare med strips eller mos"}
+  ],
+  "korv": [
+    {"id": 83, "name": "Grillad korv med bröd", "price": 25, "description": ""},
+    {"id": 84, "name": "Grillad korv med mos", "price": 55, "description": ""},
+    {"id": 85, "name": "Grillad korv med strips", "price": 55, "description": ""},
+    {"id": 86, "name": "Kokt korv med bröd", "price": 25, "description": ""},
+    {"id": 87, "name": "Kokt korv med mos", "price": 55, "description": ""},
+    {"id": 88, "name": "Kokt korv med strips", "price": 55, "description": ""},
+    {"id": 89, "name": "Bamsekorv med bröd", "price": 35, "description": ""},
+    {"id": 90, "name": "Bamsekorv med mos", "price": 65, "description": ""},
+    {"id": 91, "name": "Bamsekorv med strips", "price": 65, "description": ""},
+    {"id": 92, "name": "Tjock korv med bröd", "price": 40, "description": ""},
+    {"id": 93, "name": "Tjock korv med mos", "price": 70, "description": ""},
+    {"id": 94, "name": "Tjock korv med strips", "price": 70, "description": ""}
+  ],
+  "tillbehor": [
+    {"id": 95, "name": "Räksallad (tillägg)", "price": 25, "description": ""},
+    {"id": 96, "name": "Dubbel korv", "price": 50, "description": ""},
+    {"id": 97, "name": "Ostskiva", "price": 10, "description": ""},
+    {"id": 98, "name": "Bacon", "price": 10, "description": ""}
   ]
 }
