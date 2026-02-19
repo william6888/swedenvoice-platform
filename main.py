@@ -2,6 +2,7 @@
 Gislegrillen Voice AI Order System
 FastAPI backend for Vapi.ai integration with Groq LLM
 """
+from __future__ import annotations
 
 import json
 import os
