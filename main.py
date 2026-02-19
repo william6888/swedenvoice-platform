@@ -564,18 +564,24 @@ def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) 
     rest_id = (rest_id or "Gislegrillen_01").strip()
     if _supabase_client:
         try:
-            r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
+            r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).is_("deleted_at", "null").limit(1).execute()
             if r.data and len(r.data) > 0:
                 row = r.data[0]
                 return (row["external_id"], str(row["id"]))
-        except Exception as e:
-            print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
+        except Exception:
+            try:
+                r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
+                if r.data and len(r.data) > 0:
+                    row = r.data[0]
+                    return (row["external_id"], str(row["id"]))
+            except Exception as e:
+                print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
     return (rest_id, RESTAURANT_UUID)
 
 
 def _refresh_active_tenant_set() -> None:
     """Uppdatera _ACTIVE_TENANT_UUIDS från DB. Anropas lazy vid behov.
-    Fas 3: när deleted_at finns, använd .is_("deleted_at", "null") eller filter för aktiva."""
+    Fas 3: endast restauranger med deleted_at IS NULL räknas som aktiva."""
     global _ACTIVE_TENANT_LAST_REFRESH, _ACTIVE_TENANT_UUIDS
     now = time.time()
     if now - _ACTIVE_TENANT_LAST_REFRESH < _ACTIVE_TENANT_REFRESH_INTERVAL_SEC:
@@ -584,13 +590,21 @@ def _refresh_active_tenant_set() -> None:
     if not _supabase_client:
         return
     try:
-        r = _supabase_client.table("restaurants").select("id").execute()
+        r = _supabase_client.table("restaurants").select("id").is_("deleted_at", "null").execute()
         if r.data:
             _ACTIVE_TENANT_UUIDS = {str(row["id"]) for row in r.data}
         else:
             _ACTIVE_TENANT_UUIDS = set()
     except Exception as e:
-        print(f"⚠️  Active tenant refresh failed: {e}")
+        try:
+            r = _supabase_client.table("restaurants").select("id").execute()
+            if r.data:
+                _ACTIVE_TENANT_UUIDS = {str(row["id"]) for row in r.data}
+            else:
+                _ACTIVE_TENANT_UUIDS = set()
+            print("⚠️  Fas 3: kör supabase_fas3_deleted_at.sql för soft delete (deleted_at saknas)")
+        except Exception as e2:
+            print(f"⚠️  Active tenant refresh failed: {e2}")
 
 
 def _is_tenant_active(restaurant_uuid: Optional[str]) -> bool:
@@ -631,13 +645,18 @@ def _fetch_restaurant_config_from_db(rest_id: str) -> Optional[dict]:
     try:
         r = _supabase_client.table("restaurants").select(
             "id, external_id, throttle_bucket_size, throttle_refill_per_sec"
-        ).eq("external_id", rest_id).limit(1).execute()
+        ).eq("external_id", rest_id).is_("deleted_at", "null").limit(1).execute()
     except Exception:
         try:
-            r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
-        except Exception as e:
-            print("⚠️  fetch_restaurant_config_from_db failed: %s" % e)
-            return None
+            r = _supabase_client.table("restaurants").select(
+                "id, external_id, throttle_bucket_size, throttle_refill_per_sec"
+            ).eq("external_id", rest_id).is_("deleted_at", "null").limit(1).execute()
+        except Exception:
+            try:
+                r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).is_("deleted_at", "null").limit(1).execute()
+            except Exception as e:
+                print("⚠️  fetch_restaurant_config_from_db failed: %s" % e)
+                return None
     if not r.data or len(r.data) == 0:
         return None
     row = r.data[0]
@@ -788,7 +807,8 @@ def _token_bucket_allow(rest_id: str) -> bool:
 
 
 def _invalidate_tenant_caches(rest_id: str) -> None:
-    """Rensa config-cache och call_id-cache för denna tenant (Instant Kill). Tar omedelbart bort UUID från aktiva-set."""
+    """Rensa config-cache, call_id-cache, circuit breaker och token bucket för denna tenant (Instant Kill).
+    Tar omedelbart bort UUID från aktiva-set. Rensar minne för borttagna tenants."""
     uuid_to_remove = None
     if rest_id in _CONFIG_CACHE:
         uuid_to_remove = _CONFIG_CACHE[rest_id].get("restaurant_uuid")
@@ -796,6 +816,17 @@ def _invalidate_tenant_caches(rest_id: str) -> None:
     to_del = [cid for cid, v in _CALL_RESTAURANT_CACHE.items() if v.get("restaurant_id") == rest_id]
     for cid in to_del:
         del _CALL_RESTAURANT_CACHE[cid]
+    if rest_id in _CIRCUIT_BREAKER:
+        del _CIRCUIT_BREAKER[rest_id]
+    if rest_id in _TOKEN_BUCKET:
+        del _TOKEN_BUCKET[rest_id]
+    if not uuid_to_remove and _supabase_client:
+        try:
+            r = _supabase_client.table("restaurants").select("id").eq("external_id", rest_id).limit(1).execute()
+            if r.data and len(r.data) > 0:
+                uuid_to_remove = str(r.data[0]["id"])
+        except Exception:
+            pass
     if uuid_to_remove:
         _ACTIVE_TENANT_UUIDS.discard(str(uuid_to_remove))
     global _ACTIVE_TENANT_LAST_REFRESH
@@ -1067,6 +1098,8 @@ async def place_order(request: Request):
                 raise HTTPException(status_code=400, detail="No place_order tool call found")
         
         # Direct format: {"items": [...], "special_requests": "..."}
+        # OBS: Går inte genom Fas 1–3 (ingen rest_id, circuit breaker, token bucket eller tenant-check).
+        # Använd för intern/direct API; för multi-tenant använd Vapi-format eller /vapi/webhook.
         req = PlaceOrderRequest(**body)
         order = _process_place_order(req.items, req.special_requests)
         return JSONResponse(content={
@@ -1192,6 +1225,35 @@ async def admin_invalidate_tenant(rest_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     _invalidate_tenant_caches(rest_id.strip())
     return {"ok": True, "message": "Tenant caches invalidated", "rest_id": rest_id.strip()}
+
+
+@app.post("/admin/tenants/{rest_id}/soft-delete")
+async def admin_soft_delete_tenant(rest_id: str, request: Request):
+    """
+    Fas 3: Soft delete – (1) Instant Kill (invalidate), (2) sätt deleted_at = now() i DB.
+    Tenant serveras inte längre; orders behålls. Kräver X-Admin-Key = ADMIN_SECRET.
+    """
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rest_id = rest_id.strip()
+    _invalidate_tenant_caches(rest_id)
+    if not _supabase_client:
+        return {
+            "ok": True,
+            "message": "Tenant caches invalidated (Instant Kill). Supabase ej konfigurerad – deleted_at kunde inte sättas; sätt den manuellt i DB om du använder Fas 3.",
+            "rest_id": rest_id,
+        }
+    try:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        _supabase_client.table("restaurants").update({"deleted_at": ts}).eq("external_id", rest_id).execute()
+    except Exception as e:
+        err = str(e).lower()
+        print("⚠️  Soft delete DB update failed: %s" % e)
+        if "deleted_at" in err or "column" in err:
+            raise HTTPException(status_code=400, detail="Kör supabase_fas3_deleted_at.sql i Supabase först (kolumn deleted_at saknas).")
+        raise HTTPException(status_code=500, detail="DB update failed: " + str(e))
+    return {"ok": True, "message": "Tenant soft-deleted (caches invalidated, deleted_at set)", "rest_id": rest_id}
 
 
 # ==================== VAPI WEBHOOK ENDPOINTS ====================
