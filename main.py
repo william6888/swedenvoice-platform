@@ -2,13 +2,12 @@
 Gislegrillen Voice AI Order System
 FastAPI backend for Vapi.ai integration with Groq LLM
 """
-from __future__ import annotations
 
 import json
 import os
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import requests
@@ -410,14 +409,14 @@ def _get_restaurant_id_from_webhook(body: dict) -> str:
 
 
 # Cache: call_id -> (restaurant_id, restaurant_uuid) så att place_order vet vilken restaurang även om anropet saknar query-params.
-# TTL 1 timme; rensa vid skriv om cache blir för stor.
-_CALL_RESTAURANT_CACHE: dict[str, dict] = {}
+# TTL 1 timme; rensa vid skriv om cache blir för stor. Dict/Tuple för Python 3.7/3.8-kompatibilitet.
+_CALL_RESTAURANT_CACHE: Dict[str, dict] = {}
 _CALL_CACHE_TTL_SEC = 3600
 _CALL_CACHE_MAX_SIZE = 2000
 
 
 def _get_call_id_from_webhook(body: dict) -> Optional[str]:
-    """Hämta Vapi call id från body (message.call.id)."""
+    """Hämta Vapi call id från body (message.call.id). Returnerar alltid str eller None (säker som dict-nyckel)."""
     if not isinstance(body, dict):
         return None
     msg = body.get("message")
@@ -426,13 +425,18 @@ def _get_call_id_from_webhook(body: dict) -> Optional[str]:
     call = msg.get("call")
     if not isinstance(call, dict):
         return None
-    return call.get("id") or call.get("callId")
+    raw = call.get("id") or call.get("callId")
+    if raw is None:
+        return None
+    return str(raw).strip() or None
 
 
 def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid: Optional[str]) -> None:
     """Spara call_id -> restaurang i tillfällig cache. Rensar utgångna om cache är för stor."""
+    if not call_id:
+        return
     now = time.time()
-    _CALL_RESTAURANT_CACHE[call_id] = {
+    _CALL_RESTAURANT_CACHE[str(call_id)] = {
         "restaurant_id": restaurant_id,
         "restaurant_uuid": restaurant_uuid,
         "ts": now,
@@ -449,7 +453,7 @@ def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid
         del _CALL_RESTAURANT_CACHE[oldest[0]]
 
 
-def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -> tuple[str, Optional[str]]:
+def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -> Tuple[str, Optional[str]]:
     """Hämta (restaurant_id, restaurant_uuid) för detta anrop. Använder cache på call_id om tillgänglig, annars lookup från rest_id."""
     call_id = _get_call_id_from_webhook(body)
     if call_id and call_id in _CALL_RESTAURANT_CACHE:
@@ -462,7 +466,7 @@ def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -
     return (restaurant_id, restaurant_uuid)
 
 
-def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) -> tuple[str, Optional[str]]:
+def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) -> Tuple[str, Optional[str]]:
     """Multi-tenant: hämta rest_id från query (rest_id) eller body, slå upp i Supabase restaurants.
     Returnerar (restaurant_id, restaurant_uuid). Om lookup misslyckas: (rest_id, RESTAURANT_UUID)."""
     rest_id = None
