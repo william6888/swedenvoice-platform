@@ -25,6 +25,8 @@ load_dotenv()
 # Configuration (måste vara före Supabase-init)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# Multi-tenancy: UUID för denna restaurang (från public.restaurants). Sätts när Supabase har restaurant_uuid.
+RESTAURANT_UUID = os.getenv("RESTAURANT_UUID", "").strip() or None
 
 # Supabase client (optional – används för KDS/Lovable Dashboard)
 _supabase_client = None
@@ -276,6 +278,7 @@ def _insert_order_to_supabase(
 ) -> bool:
     """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert."""
     if not _supabase_client:
+        print("⚠️  Supabase insert SKIPPED: _supabase_client is None (SUPABASE_URL/SUPABASE_KEY saknas eller init misslyckades vid start)")
         return False
     try:
         items_json = [{"id": i.id, "name": i.name, "quantity": i.quantity, "price": i.price} for i in order.items]
@@ -288,6 +291,8 @@ def _insert_order_to_supabase(
             "status": "NYA",
             "raw_transcript": raw_transcript or "",
         }
+        if RESTAURANT_UUID:
+            row["restaurant_uuid"] = RESTAURANT_UUID
         resp = _supabase_client.table("orders").insert(row).execute()
         # Detaljerad logg (Supabase AI-felsökning)
         err = getattr(resp, "error", None)
@@ -398,6 +403,19 @@ async def debug_vonage():
         "VONAGE_API_KEY": "SET" if VONAGE_API_KEY else "MISSING",
         "VONAGE_API_SECRET": "SET" if VONAGE_API_SECRET else "MISSING",
         "VONAGE_FROM_NUMBER": "SET" if VONAGE_FROM_NUMBER else "MISSING",
+    }
+
+@app.get("/debug-supabase")
+async def debug_supabase():
+    """DEBUG: Kontrollera om Supabase är konfigurerad på denna deployment (Railway)."""
+    return {
+        "SUPABASE_URL": "SET" if SUPABASE_URL else "MISSING",
+        "SUPABASE_KEY": "SET" if SUPABASE_KEY else "MISSING",
+        "RESTAURANT_UUID": "SET" if RESTAURANT_UUID else "MISSING",
+        "client_initialized": _supabase_client is not None,
+        "message": "OK – insert till orders ska fungera"
+        if _supabase_client and RESTAURANT_UUID
+        else "FEL – Supabase-insert skippas (saknad URL/KEY eller RESTAURANT_UUID)",
     }
 
 @app.get("/")
