@@ -54,11 +54,17 @@ git checkout backup/stable-working
 - **Tagg:** `stable-working-pre-fas1` (pekar på commit med indentation-fix, multi-tenant, call_id-cache, request-isolering – senast verifierat fungerande på Railway).
 - **Branch:** `backup/stable-working` (samma commit).
 
-**Viktigt:** Pusha taggen och backup-branchen till GitHub så att de finns även om du byter dator eller rensar lokalt:
+**Viktigt:** Tagg och branch är redan pushade till GitHub. Om du klonat repot på en annan dator: `git fetch --tags` så att taggen syns.
 
-```bash
-git push origin stable-working-pre-fas1
-git push origin backup/stable-working
-```
+---
 
-Då kan du när som helst `git checkout stable-working-pre-fas1` eller deploya `backup/stable-working` på Railway.
+## Har du allt? (så du inte missar något)
+
+| Vad | Var det sparát? | Vid återställning |
+|-----|-----------------|-------------------|
+| **Kod (main.py, requirements.txt, Procfile, etc.)** | Ja – allt som finns i commit 2a81c63. | Du får exakt den koden med `git checkout stable-working-pre-fas1` eller branchen `backup/stable-working`. |
+| **.env (lokal)** | Nej – .env committas inte (hemligheter). | Behåll en lokal kopia av .env, eller återskapa från .env.template. Railway påverkas inte av git; dina Railway-variabler är oförändrade. |
+| **Railway-variabler** | Nej – de ligger i Railway, inte i git. | Vid återställning av kod ändras de inte. Om du skapat om Railway-projektet måste du sätta variablerna igen (SUPABASE_URL, SUPABASE_KEY, RESTAURANT_UUID, etc.) från .env.template. |
+| **Supabase / Vapi / Lovable** | Nej – databas och tjänster är utanför repot. | Återställning av kod påverkar inte dem. Samma DB, samma Vapi-URL, samma Lovable. |
+
+**Verifiera efter återställning:** Kör `python3 test_order_railway.py` (mot Railway-URL). Ska ge 200 och order_id om allt är som det ska.
