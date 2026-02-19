@@ -3,11 +3,13 @@ Gislegrillen Voice AI Order System
 FastAPI backend for Vapi.ai integration with Groq LLM
 """
 
+import base64
+import hashlib
 import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
 import requests
@@ -19,8 +21,24 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 
-# Load environment variables
-load_dotenv()
+# Load .env från samma mapp som main.py (så ADMIN_SECRET m.m. hittas oavsett arbetskatalog)
+_env_path = Path(__file__).resolve().parent / ".env"
+_load_ok = load_dotenv(dotenv_path=str(_env_path))
+if not _load_ok:
+    load_dotenv()
+# Fallback: om ADMIN_SECRET fortfarande saknas (t.ex. dotenv-parsefel), läs raden direkt från .env
+if not os.getenv("ADMIN_SECRET") and _env_path.exists():
+    try:
+        with open(_env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("ADMIN_SECRET="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        os.environ["ADMIN_SECRET"] = val
+                    break
+    except Exception:
+        pass
 
 # Configuration (måste vara före Supabase-init)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -49,6 +67,21 @@ VONAGE_API_SECRET = os.getenv("VONAGE_API_SECRET", "")
 VONAGE_FROM_NUMBER = os.getenv("VONAGE_FROM_NUMBER", "")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
+# Fas 1 Safety Net: admin-endpoint och alert
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
+PUSHOVER_ALERTS_USER_KEY = os.getenv("PUSHOVER_ALERTS_USER_KEY", PUSHOVER_USER_KEY or "").strip()
+PUSHOVER_ALERTS_TOKEN = os.getenv("PUSHOVER_ALERTS_TOKEN", PUSHOVER_API_TOKEN or "").strip()
+
+# Fas 2: Kryptering av tenant-nycklar (restaurant_secrets)
+ENCRYPTION_SECRET = os.getenv("ENCRYPTION_SECRET", "").strip()
+_fernet = None
+if ENCRYPTION_SECRET:
+    try:
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_SECRET.encode()).digest())
+        _fernet = Fernet(key)
+    except Exception as e:
+        print("⚠️  Fernet init failed (Fas 2 secrets disabled): %s" % e)
 
 # File paths
 BASE_DIR = Path(__file__).parent
@@ -85,6 +118,7 @@ async def startup_debug():
     print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
+    print(f"Fas 1: POST /admin/tenants/{{rest_id}}/invalidate (ADMIN_SECRET={'SET' if ADMIN_SECRET else 'MISSING'})")
 
 # ==================== DATA MODELS ====================
 
@@ -414,6 +448,27 @@ _CALL_RESTAURANT_CACHE: Dict[str, dict] = {}
 _CALL_CACHE_TTL_SEC = 3600
 _CALL_CACHE_MAX_SIZE = 2000
 
+# ==================== FAS 1: SAFETY NET ====================
+# Aktiva-tenant-set: uppdateras var 1:e minut från DB. Vid cache-användning validerar vi mot denna.
+_ACTIVE_TENANT_UUIDS: set = set()
+_ACTIVE_TENANT_LAST_REFRESH: float = 0
+_ACTIVE_TENANT_REFRESH_INTERVAL_SEC = 60
+
+# Config-cache: rest_id -> {restaurant_id, restaurant_uuid, ts, throttle_bucket_size, throttle_refill_per_sec, tenant_secrets?}. TTL 5 min.
+_CONFIG_CACHE: Dict[str, dict] = {}
+_CONFIG_CACHE_TTL_SEC = 300
+
+# Circuit breaker: rest_id -> {fail_count, first_fail_ts, open_until_ts, alert_sent}
+_CIRCUIT_BREAKER: Dict[str, dict] = {}
+_CIRCUIT_FAIL_THRESHOLD = 5
+_CIRCUIT_WINDOW_SEC = 60
+_CIRCUIT_OPEN_DURATION_SEC = 60
+
+# Token bucket: rest_id -> {tokens, last_ts}. Default 20 bucket, 0.1 refill/s.
+_TOKEN_BUCKET: Dict[str, dict] = {}
+_TOKEN_BUCKET_DEFAULT_SIZE = 20
+_TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC = 0.1
+
 
 def _get_call_id_from_webhook(body: dict) -> Optional[str]:
     """Hämta Vapi call id från body (message.call.id). Returnerar alltid str eller None (säker som dict-nyckel)."""
@@ -466,6 +521,30 @@ def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -
     return (restaurant_id, restaurant_uuid)
 
 
+def _decrypt_tenant_config(encrypted_b64: str) -> Optional[Dict[str, Any]]:
+    """Fas 2: Dekryptera encrypted_config från restaurant_secrets. Returnerar dict eller None."""
+    if not _fernet or not encrypted_b64:
+        return None
+    try:
+        raw = _fernet.decrypt(encrypted_b64.encode() if isinstance(encrypted_b64, str) else encrypted_b64)
+        return json.loads(raw.decode())
+    except Exception as e:
+        print("⚠️  Decrypt tenant config failed: %s" % e)
+        return None
+
+
+def _encrypt_tenant_config(plain_dict: Dict[str, Any]) -> Optional[str]:
+    """Fas 2: Kryptera config-dict till base64-sträng för lagring i restaurant_secrets."""
+    if not _fernet:
+        return None
+    try:
+        raw = json.dumps(plain_dict).encode()
+        return _fernet.encrypt(raw).decode()
+    except Exception as e:
+        print("⚠️  Encrypt tenant config failed: %s" % e)
+        return None
+
+
 def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) -> Tuple[str, Optional[str]]:
     """Multi-tenant: hämta rest_id från query (rest_id) eller body, slå upp i Supabase restaurants.
     Returnerar (restaurant_id, restaurant_uuid). Om lookup misslyckas: (rest_id, RESTAURANT_UUID)."""
@@ -492,6 +571,235 @@ def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) 
         except Exception as e:
             print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
     return (rest_id, RESTAURANT_UUID)
+
+
+def _refresh_active_tenant_set() -> None:
+    """Uppdatera _ACTIVE_TENANT_UUIDS från DB. Anropas lazy vid behov.
+    Fas 3: när deleted_at finns, använd .is_("deleted_at", "null") eller filter för aktiva."""
+    global _ACTIVE_TENANT_LAST_REFRESH, _ACTIVE_TENANT_UUIDS
+    now = time.time()
+    if now - _ACTIVE_TENANT_LAST_REFRESH < _ACTIVE_TENANT_REFRESH_INTERVAL_SEC:
+        return
+    _ACTIVE_TENANT_LAST_REFRESH = now
+    if not _supabase_client:
+        return
+    try:
+        r = _supabase_client.table("restaurants").select("id").execute()
+        if r.data:
+            _ACTIVE_TENANT_UUIDS = {str(row["id"]) for row in r.data}
+        else:
+            _ACTIVE_TENANT_UUIDS = set()
+    except Exception as e:
+        print(f"⚠️  Active tenant refresh failed: {e}")
+
+
+def _is_tenant_active(restaurant_uuid: Optional[str]) -> bool:
+    """Returnera True om restaurant_uuid finns i aktiva-tenant-set. Uppdaterar set om det är för gammalt."""
+    if not restaurant_uuid:
+        return False
+    _refresh_active_tenant_set()
+    return str(restaurant_uuid) in _ACTIVE_TENANT_UUIDS
+
+
+def _get_rest_id_from_request(request: Optional[Request], body: dict) -> str:
+    """Hämta rest_id från query eller body (för circuit breaker och token bucket innan lookup)."""
+    if request:
+        r = request.query_params.get("rest_id")
+        if r:
+            return r.strip()
+    if isinstance(body, dict):
+        r = body.get("rest_id")
+        if r:
+            return str(r).strip()
+        msg = body.get("message")
+        if isinstance(msg, dict):
+            call = msg.get("call")
+            if isinstance(call, dict):
+                meta = call.get("metadata")
+                if isinstance(meta, dict):
+                    r = meta.get("rest_id")
+                    if r:
+                        return str(r).strip()
+    return "Gislegrillen_01"
+
+
+def _fetch_restaurant_config_from_db(rest_id: str) -> Optional[dict]:
+    """Fas 2: Hämta full config från DB (restaurants + restaurant_secrets). Returnerar dict eller None.
+    Tolerant om throttle-kolumner eller restaurant_secrets saknas (fallback till default)."""
+    if not _supabase_client:
+        return None
+    try:
+        r = _supabase_client.table("restaurants").select(
+            "id, external_id, throttle_bucket_size, throttle_refill_per_sec"
+        ).eq("external_id", rest_id).limit(1).execute()
+    except Exception:
+        try:
+            r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
+        except Exception as e:
+            print("⚠️  fetch_restaurant_config_from_db failed: %s" % e)
+            return None
+    if not r.data or len(r.data) == 0:
+        return None
+    row = r.data[0]
+    restaurant_uuid = str(row["id"])
+    bucket = _TOKEN_BUCKET_DEFAULT_SIZE
+    refill = _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC
+    if row.get("throttle_bucket_size") is not None:
+        try:
+            bucket = int(row["throttle_bucket_size"])
+        except (TypeError, ValueError):
+            pass
+    if row.get("throttle_refill_per_sec") is not None:
+        try:
+            refill = float(row["throttle_refill_per_sec"])
+        except (TypeError, ValueError):
+            pass
+    config = {
+        "restaurant_id": row.get("external_id") or rest_id,
+        "restaurant_uuid": restaurant_uuid,
+        "throttle_bucket_size": bucket,
+        "throttle_refill_per_sec": refill,
+    }
+    try:
+        sec = _supabase_client.table("restaurant_secrets").select("encrypted_config").eq("restaurant_uuid", row["id"]).limit(1).execute()
+        if sec.data and len(sec.data) > 0 and sec.data[0].get("encrypted_config"):
+            dec = _decrypt_tenant_config(sec.data[0]["encrypted_config"])
+            if dec:
+                config["tenant_secrets"] = dec
+    except Exception:
+        pass
+    return config
+
+
+def _get_restaurant_config_cached(body: dict, request: Optional[Request]) -> Tuple[Optional[str], Optional[str]]:
+    """Fas 1+2: Hämta (restaurant_id, restaurant_uuid) med config-cache (5 min), throttle från DB, aktiva-tenant-validering.
+    Returnerar (None, None) om tenant inte är aktiv (t.ex. nyss raderad)."""
+    rest_id = _get_rest_id_from_request(request, body)
+    now = time.time()
+    # Config-cache träff
+    if rest_id in _CONFIG_CACHE:
+        entry = _CONFIG_CACHE[rest_id]
+        if now - entry["ts"] <= _CONFIG_CACHE_TTL_SEC:
+            if _is_tenant_active(entry.get("restaurant_uuid")):
+                return (entry["restaurant_id"], entry["restaurant_uuid"])
+            del _CONFIG_CACHE[rest_id]
+    # Cache-miss: grundlookup + Fas 2 full config
+    restaurant_id, restaurant_uuid = _get_restaurant_from_webhook(body, request)
+    entry = {"restaurant_id": restaurant_id, "restaurant_uuid": restaurant_uuid, "ts": now,
+             "throttle_bucket_size": _TOKEN_BUCKET_DEFAULT_SIZE, "throttle_refill_per_sec": _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC}
+    db_config = _fetch_restaurant_config_from_db(rest_id)
+    if db_config:
+        entry["throttle_bucket_size"] = db_config.get("throttle_bucket_size", _TOKEN_BUCKET_DEFAULT_SIZE)
+        entry["throttle_refill_per_sec"] = db_config.get("throttle_refill_per_sec", _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC)
+        if db_config.get("tenant_secrets"):
+            entry["tenant_secrets"] = db_config["tenant_secrets"]
+    _CONFIG_CACHE[rest_id] = entry
+    if not _is_tenant_active(restaurant_uuid):
+        return (None, None)
+    return (restaurant_id, restaurant_uuid)
+
+
+def _circuit_breaker_allow(rest_id: str) -> bool:
+    """Returnera True om anrop för denna rest_id ska tillåtas. Uppdaterar state vid fel (anropas separat)."""
+    now = time.time()
+    if rest_id not in _CIRCUIT_BREAKER:
+        return True
+    entry = _CIRCUIT_BREAKER[rest_id]
+    if now < entry.get("open_until_ts", 0):
+        return False
+    # Circuit har stängt (tiden gått): återställ alert_sent så nästa öppning skickar notis igen
+    entry["alert_sent"] = False
+    return True
+
+
+def _circuit_breaker_record_failure(rest_id: str) -> bool:
+    """Registrera ett fel för rest_id. Returnerar True om breakern just öppnades (skicka alert)."""
+    now = time.time()
+    if rest_id not in _CIRCUIT_BREAKER:
+        _CIRCUIT_BREAKER[rest_id] = {"fail_count": 0, "first_fail_ts": now, "open_until_ts": 0, "alert_sent": False}
+    entry = _CIRCUIT_BREAKER[rest_id]
+    entry["fail_count"] = entry.get("fail_count", 0) + 1
+    if entry.get("first_fail_ts", now) < now - _CIRCUIT_WINDOW_SEC:
+        entry["first_fail_ts"] = now
+        entry["fail_count"] = 1
+    if entry["fail_count"] >= _CIRCUIT_FAIL_THRESHOLD:
+        entry["open_until_ts"] = now + _CIRCUIT_OPEN_DURATION_SEC
+        if not entry.get("alert_sent"):
+            entry["alert_sent"] = True
+            return True
+    return False
+
+
+def _circuit_breaker_record_success(rest_id: str) -> None:
+    """Vid lyckat anrop: nollställ räknare."""
+    if rest_id in _CIRCUIT_BREAKER:
+        _CIRCUIT_BREAKER[rest_id]["fail_count"] = 0
+        _CIRCUIT_BREAKER[rest_id]["alert_sent"] = False
+
+
+def _send_circuit_breaker_alert(rest_id: str) -> None:
+    """Skicka notis när circuit breaker öppnas (Pushover)."""
+    if not PUSHOVER_ALERTS_USER_KEY or not PUSHOVER_ALERTS_TOKEN:
+        print("⚠️  Circuit breaker öppnad för rest_id=%s men PUSHOVER_ALERTS_* ej satt" % rest_id)
+        return
+    try:
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "user": PUSHOVER_ALERTS_USER_KEY,
+                "token": PUSHOVER_ALERTS_TOKEN,
+                "message": "[ALERT] Circuit breaker ÖPPNAD för rest_id=%s – %d fel på %d s. Kontrollera konfiguration."
+                % (rest_id, _CIRCUIT_FAIL_THRESHOLD, _CIRCUIT_WINDOW_SEC),
+                "title": "SwedenVoice Circuit Breaker",
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        print("⚠️  Circuit breaker alert failed: %s" % e)
+
+
+def _token_bucket_allow(rest_id: str) -> bool:
+    """Returnera True om anrop ska tillåtas (token bucket). Fas 2: per-tenant-parametrar från config-cache."""
+    now = time.time()
+    bucket_size = _TOKEN_BUCKET_DEFAULT_SIZE
+    refill_per_sec = _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC
+    if rest_id in _CONFIG_CACHE:
+        entry = _CONFIG_CACHE[rest_id]
+        bucket_size = entry.get("throttle_bucket_size", bucket_size)
+        refill_per_sec = entry.get("throttle_refill_per_sec", refill_per_sec)
+    try:
+        bucket_size = max(1, int(bucket_size))
+    except (TypeError, ValueError):
+        bucket_size = _TOKEN_BUCKET_DEFAULT_SIZE
+    try:
+        refill_per_sec = max(0.01, float(refill_per_sec))
+    except (TypeError, ValueError):
+        refill_per_sec = _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC
+    if rest_id not in _TOKEN_BUCKET:
+        _TOKEN_BUCKET[rest_id] = {"tokens": bucket_size, "last_ts": now}
+    entry = _TOKEN_BUCKET[rest_id]
+    refill = (now - entry["last_ts"]) * refill_per_sec
+    entry["tokens"] = min(bucket_size, entry["tokens"] + refill)
+    entry["last_ts"] = now
+    if entry["tokens"] >= 1:
+        entry["tokens"] -= 1
+        return True
+    return False
+
+
+def _invalidate_tenant_caches(rest_id: str) -> None:
+    """Rensa config-cache och call_id-cache för denna tenant (Instant Kill). Tar omedelbart bort UUID från aktiva-set."""
+    uuid_to_remove = None
+    if rest_id in _CONFIG_CACHE:
+        uuid_to_remove = _CONFIG_CACHE[rest_id].get("restaurant_uuid")
+        del _CONFIG_CACHE[rest_id]
+    to_del = [cid for cid, v in _CALL_RESTAURANT_CACHE.items() if v.get("restaurant_id") == rest_id]
+    for cid in to_del:
+        del _CALL_RESTAURANT_CACHE[cid]
+    if uuid_to_remove:
+        _ACTIVE_TENANT_UUIDS.discard(str(uuid_to_remove))
+    global _ACTIVE_TENANT_LAST_REFRESH
+    _ACTIVE_TENANT_LAST_REFRESH = 0
 
 
 # ==================== API ENDPOINTS ====================
@@ -690,6 +998,21 @@ async def place_order(request: Request):
             msg = body["message"]
             has_tools = msg.get("toolCalls") or msg.get("toolCallList") or msg.get("toolWithToolCallList")
             if (msg.get("type") == "tool-calls" or has_tools) and has_tools:
+                # Fas 1: rest_id, circuit breaker, token bucket, config-cache
+                rest_id = _get_rest_id_from_request(request, body)
+                call_id = _get_call_id_from_webhook(body)
+                if not rest_id and call_id and call_id in _CALL_RESTAURANT_CACHE:
+                    rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
+                rest_id = rest_id or "Gislegrillen_01"
+                if not _circuit_breaker_allow(rest_id):
+                    return JSONResponse(content={"results": [{"error": "Temporärt fel. Försök igen om en minut."}]}, status_code=200)
+                if not _token_bucket_allow(rest_id):
+                    return JSONResponse(content={"results": [{"error": "För många anrop. Vänta en stund."}]}, status_code=200)
+                restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+                if restaurant_id is None and restaurant_uuid is None:
+                    return JSONResponse(content={"results": [{"error": "Restaurangen kunde inte hittas."}]}, status_code=200)
+                if call_id:
+                    _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
                 customer_phone = _get_customer_phone_from_webhook(body)
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
@@ -706,9 +1029,9 @@ async def place_order(request: Request):
                         items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                         send_pushover_notification(order, customer_phone=customer_phone)
-                        restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                        _circuit_breaker_record_success(rest_id)
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
@@ -730,6 +1053,8 @@ async def place_order(request: Request):
                         except Exception as sms_err:
                             print(f"⚠️  SMS-orderbekräftelse misslyckades: {sms_err}")
                     except Exception as e:
+                        if _circuit_breaker_record_failure(rest_id):
+                            _send_circuit_breaker_alert(rest_id)
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
@@ -854,6 +1179,21 @@ async def test_pushover():
     except Exception as e:
         return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
 
+# ==================== FAS 1: ADMIN (Instant Kill) ====================
+
+@app.post("/admin/tenants/{rest_id}/invalidate")
+async def admin_invalidate_tenant(rest_id: str, request: Request):
+    """
+    Rensa config-cache och call_id-cache för denna tenant (Instant Kill).
+    Kräver header X-Admin-Key eller ?admin_key= med värde ADMIN_SECRET.
+    """
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _invalidate_tenant_caches(rest_id.strip())
+    return {"ok": True, "message": "Tenant caches invalidated", "rest_id": rest_id.strip()}
+
+
 # ==================== VAPI WEBHOOK ENDPOINTS ====================
 
 @app.post("/vapi/webhook")
@@ -888,6 +1228,21 @@ async def vapi_webhook(request: Request):
 
         # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
         if event_type == "tool-calls":
+            # Fas 1: rest_id för circuit breaker och token bucket (från request/body eller call_id-cache)
+            rest_id = _get_rest_id_from_request(request, body)
+            call_id = _get_call_id_from_webhook(body)
+            if not rest_id and call_id and call_id in _CALL_RESTAURANT_CACHE:
+                rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
+            rest_id = rest_id or "Gislegrillen_01"
+            if not _circuit_breaker_allow(rest_id):
+                return JSONResponse(content={"results": [{"error": "Temporärt fel. Försök igen om en minut."}]}, status_code=200)
+            if not _token_bucket_allow(rest_id):
+                return JSONResponse(content={"results": [{"error": "För många anrop. Vänta en stund."}]}, status_code=200)
+            restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+            if restaurant_id is None and restaurant_uuid is None:
+                return JSONResponse(content={"results": [{"error": "Restaurangen kunde inte hittas."}]}, status_code=200)
+            if call_id:
+                _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
             # DEBUG: logga message.call struktur för att verifiera kundnummer-sökväg
             msg_struct = body.get("message") or {}
             call_data = msg_struct.get("call") or {}
@@ -909,9 +1264,9 @@ async def vapi_webhook(request: Request):
                     items = [OrderItem(**it) for it in items_data]
                     order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                     send_pushover_notification(order, customer_phone=customer_phone)
-                    restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                    _circuit_breaker_record_success(rest_id)
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
@@ -933,6 +1288,8 @@ async def vapi_webhook(request: Request):
                         print(f"⚠️  SMS-orderbekräftelse misslyckades (påverkar inte order): {sms_err}")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
+                    if _circuit_breaker_record_failure(rest_id):
+                        _send_circuit_breaker_alert(rest_id)
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
