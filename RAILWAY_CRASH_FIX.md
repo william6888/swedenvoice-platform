@@ -1,12 +1,28 @@
-# Railway-crash – vad som ändrats
+# Railway-crash – undersökning och fix
 
-## Vad vi ändrat (denna fix)
+## Orsak (identifierad genom jämförelse mot senaste fungerande commit)
 
-1. **Ingen `from __future__ import annotations`** – vi använder nu explicita `typing.Tuple` och `typing.Dict` överallt där vi hade `tuple[...]` / `dict[...]`. Fungerar stabilt på Python 3.7, 3.8 och 3.11 (Railway kan ibland använda annan version än runtime.txt).
+**Senaste fungerande:** `2969543` – "Add /debug-supabase and Supabase skip log".
 
-2. **`call_id` alltid str** – Vapi kan skicka `message.call.id` som tal; vi konverterar till `str()` innan användning som cache-nyckel så att det inte kraschar.
+**Jämförelse:** Diff mot första multi-tenant-commit (`b487dd1`) visade två saker:
 
-3. **Säker cache-skrivning** – `_cache_restaurant_for_call` skippar om `call_id` är tom och använder `str(call_id)` vid skriv.
+### 1. Indentationsfel i `/place_order` (huvudorsaken till crash)
+
+I multi-tenant-commiten ändrades indentation av flera rader i `place_order`-endpointen:
+- Rader som skulle ligga **inuti** `try:`-blocket (restaurant_id, customer_name, _insert_order_to_supabase, results.append) fick **för få mellanslag** (20 i stället för 24).
+- Då hamnade de **utanför** try-blocket och `except Exception as e:` matchade inte längre sin `try:`.
+- Det ger **SyntaxError / IndentationError** när Python **laddar modulen** (vid `uvicorn main:app`). Servern startar därför aldrig – därav "Crashed" direkt efter deploy.
+
+**Åtgärd:** Indentation är återställd så att hela blocket (order, pushover, restaurant_id, customer_name, _insert_order_to_supabase, results.append, inner try/except för SMS) ligger inuti samma `try:`, och `except Exception as e:` har rätt indentation (24 mellanslag).
+
+### 2. Type hints (sekundärt, om Railway kör Python 3.8)
+
+- `dict[str, dict]` och `tuple[str, Optional[str]]` är ogiltiga i Python 3.8 vid utvärdering.
+- Vi har bytt till `typing.Dict` och `typing.Tuple` så att det fungerar i 3.7/3.8 och 3.11.
+
+### 3. call_id som dict-nyckel
+
+- `call_id` från Vapi kan vara tal; vi gör `str()` så att det alltid är säkert som cache-nyckel.
 
 ## Connect to Browser (på bilden)
 

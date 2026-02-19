@@ -706,10 +706,10 @@ async def place_order(request: Request):
                         items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                         send_pushover_notification(order, customer_phone=customer_phone)
-                    restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
-                    customer_name = params.get("customer_name") or params.get("customerName") or ""
-                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
-                    results.append({
+                        restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
+                        customer_name = params.get("customer_name") or params.get("customerName") or ""
+                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                        results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
                             "result": json.dumps({
