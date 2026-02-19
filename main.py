@@ -111,6 +111,17 @@ class UpdateOrderStatusRequest(BaseModel):
     order_id: str
     status: str
 
+# ==================== FLOW REGISTRY (multi-tenant / unik logik) ====================
+# Nya flöden: lägg till en handler-funktion och registrera här. Ingen if/else i webhook.
+# Idag: bara "standard". Vid behov kan restaurants.flow_type eller restaurant_settings.flow_type styra vilken som anropas.
+FLOW_HANDLERS = {"standard": None}  # None = nuvarande inline-logik; vid nytt flöde: def handle_xy(...): ... och FLOW_HANDLERS["xy"] = handle_xy
+
+
+def get_flow_handler(flow_type: Optional[str] = None):
+    """Returnerar handler för flow_type. Om okänd eller None används 'standard'."""
+    key = (flow_type or "standard").strip().lower()
+    return FLOW_HANDLERS.get(key, FLOW_HANDLERS["standard"])
+
 # ==================== HELPER FUNCTIONS ====================
 
 def _parse_items_from_params(params: dict) -> list:
@@ -274,9 +285,11 @@ def _insert_order_to_supabase(
     restaurant_id: str,
     customer_name: Optional[str] = None,
     customer_phone: Optional[str] = None,
-    raw_transcript: Optional[str] = None
+    raw_transcript: Optional[str] = None,
+    restaurant_uuid: Optional[str] = None,
 ) -> bool:
-    """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert."""
+    """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert.
+    restaurant_uuid: om None används RESTAURANT_UUID (bakåtkompat)."""
     if not _supabase_client:
         print("⚠️  Supabase insert SKIPPED: _supabase_client is None (SUPABASE_URL/SUPABASE_KEY saknas eller init misslyckades vid start)")
         return False
@@ -291,8 +304,9 @@ def _insert_order_to_supabase(
             "status": "NYA",
             "raw_transcript": raw_transcript or "",
         }
-        if RESTAURANT_UUID:
-            row["restaurant_uuid"] = RESTAURANT_UUID
+        uuid_val = restaurant_uuid or RESTAURANT_UUID
+        if uuid_val:
+            row["restaurant_uuid"] = uuid_val
         resp = _supabase_client.table("orders").insert(row).execute()
         # Detaljerad logg (Supabase AI-felsökning)
         err = getattr(resp, "error", None)
@@ -389,9 +403,90 @@ def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
 
 
 def _get_restaurant_id_from_webhook(body: dict) -> str:
-    """Hämta restaurant_id för Supabase. En-restaurant: alltid Gislegrillen_01.
-    Vapi skickar assistantId som UUID – Lovable filtrerar på Gislegrillen_01."""
-    return "Gislegrillen_01"
+    """Legacy: returnerar bara restaurant_id. Använd _get_restaurant_from_webhook för multi-tenant."""
+    rid, _ = _get_restaurant_from_webhook(body, None)
+    return rid
+
+
+# Cache: call_id -> (restaurant_id, restaurant_uuid) så att place_order vet vilken restaurang även om anropet saknar query-params.
+# TTL 1 timme; rensa vid skriv om cache blir för stor.
+_CALL_RESTAURANT_CACHE: dict[str, dict] = {}
+_CALL_CACHE_TTL_SEC = 3600
+_CALL_CACHE_MAX_SIZE = 2000
+
+
+def _get_call_id_from_webhook(body: dict) -> Optional[str]:
+    """Hämta Vapi call id från body (message.call.id)."""
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message")
+    if not isinstance(msg, dict):
+        return None
+    call = msg.get("call")
+    if not isinstance(call, dict):
+        return None
+    return call.get("id") or call.get("callId")
+
+
+def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid: Optional[str]) -> None:
+    """Spara call_id -> restaurang i tillfällig cache. Rensar utgångna om cache är för stor."""
+    now = time.time()
+    _CALL_RESTAURANT_CACHE[call_id] = {
+        "restaurant_id": restaurant_id,
+        "restaurant_uuid": restaurant_uuid,
+        "ts": now,
+    }
+    if len(_CALL_RESTAURANT_CACHE) <= _CALL_CACHE_MAX_SIZE:
+        return
+    # Rensa utgångna
+    expired = [k for k, v in _CALL_RESTAURANT_CACHE.items() if (now - v["ts"]) > _CALL_CACHE_TTL_SEC]
+    for k in expired:
+        del _CALL_RESTAURANT_CACHE[k]
+    # Om fortfarande för stor, ta bort äldsta
+    while len(_CALL_RESTAURANT_CACHE) > _CALL_CACHE_MAX_SIZE:
+        oldest = min(_CALL_RESTAURANT_CACHE.items(), key=lambda x: x[1]["ts"])
+        del _CALL_RESTAURANT_CACHE[oldest[0]]
+
+
+def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -> tuple[str, Optional[str]]:
+    """Hämta (restaurant_id, restaurant_uuid) för detta anrop. Använder cache på call_id om tillgänglig, annars lookup från rest_id."""
+    call_id = _get_call_id_from_webhook(body)
+    if call_id and call_id in _CALL_RESTAURANT_CACHE:
+        entry = _CALL_RESTAURANT_CACHE[call_id]
+        if (time.time() - entry["ts"]) <= _CALL_CACHE_TTL_SEC:
+            return (entry["restaurant_id"], entry["restaurant_uuid"])
+    restaurant_id, restaurant_uuid = _get_restaurant_from_webhook(body, request)
+    if call_id:
+        _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
+    return (restaurant_id, restaurant_uuid)
+
+
+def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) -> tuple[str, Optional[str]]:
+    """Multi-tenant: hämta rest_id från query (rest_id) eller body, slå upp i Supabase restaurants.
+    Returnerar (restaurant_id, restaurant_uuid). Om lookup misslyckas: (rest_id, RESTAURANT_UUID)."""
+    rest_id = None
+    if request:
+        rest_id = request.query_params.get("rest_id")
+    if not rest_id and isinstance(body, dict):
+        rest_id = body.get("rest_id")
+        if not rest_id:
+            msg = body.get("message")
+            if isinstance(msg, dict):
+                call = msg.get("call")
+                if isinstance(call, dict):
+                    meta = call.get("metadata")
+                    if isinstance(meta, dict):
+                        rest_id = meta.get("rest_id")
+    rest_id = (rest_id or "Gislegrillen_01").strip()
+    if _supabase_client:
+        try:
+            r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
+            if r.data and len(r.data) > 0:
+                row = r.data[0]
+                return (row["external_id"], str(row["id"]))
+        except Exception as e:
+            print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
+    return (rest_id, RESTAURANT_UUID)
 
 
 # ==================== API ENDPOINTS ====================
@@ -417,6 +512,27 @@ async def debug_supabase():
         if _supabase_client and RESTAURANT_UUID
         else "FEL – Supabase-insert skippas (saknad URL/KEY eller RESTAURANT_UUID)",
     }
+
+
+@app.get("/debug-tenant")
+async def debug_tenant(request: Request):
+    """DEBUG: Verifiera tenant-lookup. Anrop med ?rest_id=Gislegrillen_01 (eller annat external_id)."""
+    rest_id = request.query_params.get("rest_id") or "Gislegrillen_01"
+    restaurant_id, restaurant_uuid = _get_restaurant_from_webhook({"rest_id": rest_id}, request)
+    return {
+        "rest_id_requested": rest_id,
+        "restaurant_id": restaurant_id,
+        "restaurant_uuid": restaurant_uuid,
+        "lookup_ok": _supabase_client is not None and restaurant_uuid is not None,
+    }
+
+
+@app.get("/debug-call-cache")
+async def debug_call_cache():
+    """DEBUG: Antal call_id → restaurant som finns i cache (TTL 1h)."""
+    now = time.time()
+    valid = sum(1 for v in _CALL_RESTAURANT_CACHE.values() if (now - v["ts"]) <= _CALL_CACHE_TTL_SEC)
+    return {"cache_size": len(_CALL_RESTAURANT_CACHE), "entries_within_ttl": valid}
 
 @app.get("/")
 async def root():
@@ -585,10 +701,10 @@ async def place_order(request: Request):
                         items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                         send_pushover_notification(order, customer_phone=customer_phone)
-                        restaurant_id = _get_restaurant_id_from_webhook(body)
-                        customer_name = params.get("customer_name") or params.get("customerName") or ""
-                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone)
-                        results.append({
+                    restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
+                    customer_name = params.get("customer_name") or params.get("customerName") or ""
+                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                    results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
                             "result": json.dumps({
@@ -739,9 +855,11 @@ async def test_pushover():
 @app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
     """
-    Vapi webhook endpoint for call events.
-    Handles: call started, ended, tool-calls, etc.
-    If tool-calls arrive here (assistant-level URL), process place_order.
+    Vapi webhook – tenant-blind, request-isolerad.
+    - rest_id från query (?rest_id=...) eller body → lookup i Supabase restaurants → (restaurant_id, restaurant_uuid).
+    - call_id (message.call.id) sparas tillsammans med restaurant i cache så att place_order alltid får rätt tenant (även vid separata anrop).
+    - place_order använder _get_restaurant_for_webhook (cache eller lookup) och sparar order med rätt restaurant_uuid.
+    - Request-isolering: vid alla undantag returneras 200 med säkert svar (ingen 500, ingen domino).
     """
     try:
         body = await request.json()
@@ -786,15 +904,15 @@ async def vapi_webhook(request: Request):
                     items = [OrderItem(**it) for it in items_data]
                     order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
                     send_pushover_notification(order, customer_phone=customer_phone)
-                    restaurant_id = _get_restaurant_id_from_webhook(body)
+                    restaurant_id, restaurant_uuid = _get_restaurant_for_webhook(body, request)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
-                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone)
+                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
                         "result": json.dumps({"success": True, "order_id": order.order_id})
                     })
-                    print(f"✅ Processed place_order via webhook: {order.order_id}")
+                    print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
                     print("=== SMS CHECKPOINT 1 ===")
                     try:
                         print("=== SMS CHECKPOINT 2 ===")
@@ -823,7 +941,11 @@ async def vapi_webhook(request: Request):
         
     except Exception as e:
         print(f"❌ Vapi webhook error: {e}")
-        return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
+        # Request-isolering: returnera alltid 200 så att processen inte kraschar och Vapi inte retry:ar i oändlighet
+        return JSONResponse(
+            content={"success": False, "message": "Något gick fel. Försök igen."},
+            status_code=200,
+        )
 
 # ==================== SERVER STARTUP ====================
 
