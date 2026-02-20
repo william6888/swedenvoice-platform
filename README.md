@@ -145,7 +145,8 @@ Access the dashboard at: `http://localhost:8000/dashboard`
 ### Core Endpoints
 
 - `GET /` - API information
-- `GET /menu` - Get full menu
+- `GET /menu` - Get full menu (cached 3 min; clear with `POST /admin/menu/invalidate` if you change menu.json)
+- `GET /api/keywords` - Keywords/keyterms for speech recognition (sanitized, max 50 chars)
 - `GET /orders` - Get all orders
 - `POST /place_order` - Place new order (called by Vapi)
 - `POST /update_order_status` - Update order status
@@ -155,7 +156,19 @@ Access the dashboard at: `http://localhost:8000/dashboard`
 
 ### Webhooks
 
-- `POST /vapi/webhook` - Vapi webhook events
+- `POST /vapi/webhook` - Vapi webhook events (set Server URL in Vapi to `https://<your-railway-url>/vapi/webhook`)
+
+### Keyword boosting (Vapi / Speechmatics)
+
+- `GET /api/keywords` - Returns `keywords` (single words) and `keyterms` (product phrases) from the menu. Values are sanitized (letters, digits, spaces, hyphen, apostrophe, parentheses; Swedish åäö allowed) and truncated to 50 chars for provider compatibility. Use in Vapi or your speech-to-text provider (e.g. Speechmatics) to improve recognition. Optional query: `?rest_id=...` for future per-tenant menus.
+
+### Admin (Fas 2: meny-cache)
+
+- `POST /admin/menu/invalidate` - Clears the menu cache so the next `GET /menu` and `GET /api/keywords` reload from `menu.json`. Use after editing the menu so you don’t have to wait 3 minutes or restart. Requires header `X-Admin-Key: <ADMIN_SECRET>`. Optional query `?rest_id=...` to clear only that cache key.
+
+**Varför en worker?** Procfile använder `--workers 1` så att meny-cache och tenant-invalidate gäller direkt i hela appen. Flera workers skulle ge var sin cache; då gäller invalidate bara för den process som fick anropet.
+
+**Flera pizzerior:** Varje pizzeria har egen meny (och cache) via `rest_id`. Ny pizzeria = egen fil `menu_<rest_id>.json` (valfritt; annars används `menu.json`). Inget blandas. Se **MULTI_PIZZERIA.md**.
 
 ## 🔔 Order Flow
 

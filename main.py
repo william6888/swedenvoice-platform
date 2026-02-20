@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
@@ -158,8 +159,8 @@ def get_flow_handler(flow_type: Optional[str] = None):
 
 # ==================== HELPER FUNCTIONS ====================
 
-def _parse_items_from_params(params: dict) -> list:
-    """Extrahera items från params – stödjer items, order.items, full_order.items, maträtter. Normaliserar itemId/qty."""
+def _parse_items_from_params(params: dict, rest_id: Optional[str] = None) -> list:
+    """Extrahera items från params. rest_id = vilken pizzeria (för meny-namn). Stödjer items, order.items, full_order.items, maträtter."""
     items = params.get("items", [])
     if not items and "order" in params:
         items = params.get("order", {}).get("items", [])
@@ -184,19 +185,54 @@ def _parse_items_from_params(params: dict) -> list:
         if "specialRequests" in d and "special_requests" not in d:
             d["special_requests"] = d.pop("specialRequests")
         if "name" not in d and d.get("id") is not None:
-            mi = find_menu_item(int(d["id"]))
+            mi = find_menu_item(int(d["id"]), rest_id)
             d["name"] = mi["name"] if mi else f"Artikel {d['id']}"
         out.append(d)
     return out
 
-def load_menu():
-    """Load menu from JSON file"""
+def load_menu(rest_id: Optional[str] = None) -> dict:
+    """Load menu: rest_id=None eller Gislegrillen_01 → menu.json. Annars menu_{rest_id}.json, fallback menu.json. Ingen blandning mellan pizzerior."""
+    empty = {"pizzas": [], "kebabs": [], "burgers": [], "sides": [], "drinks": []}
+    if not rest_id or rest_id.strip() == "Gislegrillen_01":
+        path = MENU_FILE
+    else:
+        path = BASE_DIR / ("menu_%s.json" % rest_id.strip())
+        if not path.exists():
+            path = MENU_FILE
     try:
-        with open(MENU_FILE, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        print(f"❌ ERROR: {MENU_FILE} not found!")
-        return {"pizzas": [], "kebabs": [], "burgers": [], "sides": [], "drinks": []}
+        print("❌ ERROR: %s not found!" % path)
+        return empty
+    except Exception as e:
+        print("❌ ERROR loading menu from %s: %s" % (path, e))
+        return empty
+
+
+# Fas 2 Diamond Polish: meny-cache TTL 3 min (per rest_id för framtida multi-tenant)
+_MENU_CACHE: Dict[str, dict] = {}  # key -> {"data": menu_dict, "expires_at": float}
+_MENU_CACHE_TTL_SEC = 180
+
+
+def get_menu_cached(rest_id: Optional[str] = None) -> dict:
+    """Return menu from cache if valid, else load from file and cache. rest_id för framtida per-tenant meny."""
+    key = ("menu:%s" % rest_id) if rest_id else "menu"
+    now = time.time()
+    if key in _MENU_CACHE and now < _MENU_CACHE[key]["expires_at"]:
+        return _MENU_CACHE[key]["data"]
+    menu = load_menu(rest_id)
+    _MENU_CACHE[key] = {"data": menu, "expires_at": now + _MENU_CACHE_TTL_SEC}
+    return menu
+
+
+def _invalidate_menu_cache(rest_id: Optional[str] = None) -> None:
+    """Rensa meny-cache så nästa anrop laddar från fil. rest_id=None rensar global 'menu', annars 'menu:{rest_id}'."""
+    if rest_id:
+        _MENU_CACHE.pop(("menu:%s" % rest_id), None)
+    else:
+        _MENU_CACHE.clear()
+
 
 def load_orders():
     """Load orders from JSON file"""
@@ -211,22 +247,22 @@ def save_orders(orders):
     with open(ORDERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(orders, f, indent=2, ensure_ascii=False)
 
-def find_menu_item(item_id: int):
-    """Find menu item by ID across all categories"""
-    menu = load_menu()
+def find_menu_item(item_id: int, rest_id: Optional[str] = None):
+    """Find menu item by ID across all categories. Uses cached menu (TTL 3 min)."""
+    menu = get_menu_cached(rest_id)
     for category in menu.values():
         for item in category:
             if item.get('id') == item_id:
                 return item
     return None
 
-def calculate_total_price(items: List[OrderItem]) -> float:
-    """Calculate total price from order items"""
+def calculate_total_price(items: List[OrderItem], rest_id: Optional[str] = None) -> float:
+    """Calculate total price from order items. rest_id = vilken pizzeria (rätt meny, rätt priser)."""
     total = 0.0
     for item in items:
-        menu_item = find_menu_item(item.id)
+        menu_item = find_menu_item(item.id, rest_id)
         if menu_item:
-            total += menu_item['price'] * item.quantity
+            total += menu_item["price"] * item.quantity
     return total
 
 def generate_order_id() -> str:
@@ -940,15 +976,55 @@ async def root():
             "menu": "/menu",
             "orders": "/orders",
             "place_order": "/place_order",
-            "dashboard": "/dashboard"
+            "dashboard": "/dashboard",
+            "keywords": "/api/keywords"
         }
     }
 
 @app.get("/menu")
-async def get_menu():
-    """Get full menu"""
-    menu = load_menu()
+async def get_menu(rest_id: Optional[str] = None):
+    """Get full menu (cached 3 min). Optional rest_id for future per-tenant menu."""
+    menu = get_menu_cached(rest_id)
     return JSONResponse(content=menu)
+
+
+def _sanitize_keyword(s: str, max_len: int = 50) -> str:
+    """Tillåt bokstaver (åäö), siffror, mellanslag, bindestreck, apostrof, parenteser. Truncera till max_len."""
+    # Behåll \w (bokstaver/siffror), \s, samt - ' ( ) så att "Ciao-Ciao", "Pizza (stor)" osv. behålls
+    s = re.sub(r"[^\w\s\-'()]", " ", s, flags=re.UNICODE)
+    s = " ".join(s.split()).strip()[:max_len]
+    return s
+
+
+@app.get("/api/keywords")
+async def get_keywords(rest_id: Optional[str] = None):
+    """
+    Return product names as keywords/keyterms for Vapi/Speechmatics keyword boosting.
+    - keywords: single words (sanitized, max 50 chars)
+    - keyterms: full product names as phrases (sanitized, max 50 chars).
+    Optional rest_id for future per-tenant menu.
+    """
+    menu = get_menu_cached(rest_id)
+    keyterms_set = set()
+    words_set = set()
+    for category in menu.values():
+        if not isinstance(category, list):
+            continue
+        for item in category:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            term = _sanitize_keyword(name)
+            if term:
+                keyterms_set.add(term)
+            for word in name.split():
+                w = _sanitize_keyword(word.strip())
+                if w and len(w) > 1:
+                    words_set.add(w)
+    return JSONResponse(content={
+        "keywords": sorted(words_set),
+        "keyterms": sorted(keyterms_set),
+    })
 
 @app.get("/orders")
 async def get_orders():
@@ -1013,30 +1089,36 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
     return out
 
 
-def _process_place_order(items: List[OrderItem], special_requests: Optional[str] = None, customer_phone: Optional[str] = None, skip_pushover: bool = False) -> Order:
+def _process_place_order(
+    items: List[OrderItem],
+    special_requests: Optional[str] = None,
+    customer_phone: Optional[str] = None,
+    skip_pushover: bool = False,
+    rest_id: Optional[str] = None,
+) -> Order:
     """Process order: validate, save, print, send Pushover (om inte skip_pushover).
-    customer_phone inkluderas i Pushover när angiven. Callers med body kan anropa send_pushover själva efteråt med telefon."""
+    rest_id = vilken pizzeria (meny + priser). customer_phone inkluderas i Pushover när angiven."""
     enriched_items = []
     per_item_specs = []
     for item in items:
-        menu_item = find_menu_item(item.id)
+        menu_item = find_menu_item(item.id, rest_id)
         if not menu_item:
             raise HTTPException(
-                status_code=404, 
-                detail=f"Menu item with ID {item.id} not found"
+                status_code=404,
+                detail="Menu item with ID %s not found" % item.id,
             )
-        name = menu_item['name']
+        name = menu_item["name"]
         enriched_items.append(OrderItem(
             id=item.id,
             name=name,
             quantity=item.quantity,
-            price=menu_item['price'],
-            special_requests=item.special_requests
+            price=menu_item["price"],
+            special_requests=item.special_requests,
         ))
         if item.special_requests and item.special_requests.strip():
-            per_item_specs.append(f"{item.quantity}x {name}: {item.special_requests.strip()}")
+            per_item_specs.append("%dx %s: %s" % (item.quantity, name, item.special_requests.strip()))
     combined_special = "; ".join(per_item_specs) if per_item_specs else special_requests
-    total_price = calculate_total_price(enriched_items)
+    total_price = calculate_total_price(enriched_items, rest_id)
     order = Order(
         order_id=generate_order_id(),
         items=enriched_items,
@@ -1099,7 +1181,7 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
                 for tool_call_id, params in calls:
-                    items_data = _parse_items_from_params(params)
+                    items_data = _parse_items_from_params(params, rest_id)
                     if not items_data:
                         results.append({
                             "name": "place_order",
@@ -1109,7 +1191,7 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         continue
                     try:
                         items = [OrderItem(**it) for it in items_data]
-                        order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
+                        order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
                         send_pushover_notification(order, customer_phone=customer_phone)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
@@ -1256,6 +1338,20 @@ async def test_pushover():
 
 # ==================== FAS 1: ADMIN (Instant Kill) ====================
 
+@app.post("/admin/menu/invalidate")
+async def admin_invalidate_menu(request: Request, rest_id: Optional[str] = None):
+    """
+    Rensa meny-cache så nästa GET /menu och GET /api/keywords laddar från menu.json.
+    Använd efter ändring av menu.json så du inte behöver vänta 3 min eller starta om.
+    Kräver X-Admin-Key = ADMIN_SECRET. Optional ?rest_id= för att rensa bara den nyckeln.
+    """
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _invalidate_menu_cache(rest_id.strip() if rest_id else None)
+    return {"ok": True, "message": "Menu cache invalidated", "rest_id": rest_id or "(all)"}
+
+
 @app.post("/admin/tenants/{rest_id}/invalidate")
 async def admin_invalidate_tenant(rest_id: str, request: Request):
     """
@@ -1356,7 +1452,7 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
-                items_data = _parse_items_from_params(params)
+                items_data = _parse_items_from_params(params, rest_id)
                 if not items_data:
                     results.append({
                         "name": "place_order",
@@ -1366,7 +1462,7 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     continue
                 try:
                     items = [OrderItem(**it) for it in items_data]
-                    order = _process_place_order(items, params.get("special_requests"), skip_pushover=True)
+                    order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
                     send_pushover_notification(order, customer_phone=customer_phone)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
