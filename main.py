@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -777,6 +777,57 @@ def _send_circuit_breaker_alert(rest_id: str) -> None:
         print("⚠️  Circuit breaker alert failed: %s" % e)
 
 
+# Diamond Polish Fas 1: SMS i bakgrunden + alert vid fel (rate-limit per rest_id)
+_SMS_ALERT_LAST_SENT: Dict[str, float] = {}
+_SMS_ALERT_RATE_LIMIT_SEC = 300
+
+
+def _send_sms_failure_alert(rest_id: str, order_id: str, error_msg: str) -> None:
+    """Skicka Pushover-alert när SMS misslyckats. Rate-limit: max 1 per rest_id per 5 min. Fallback till vanlig Pushover om PUSHOVER_ALERTS_* saknas."""
+    now = time.time()
+    if rest_id in _SMS_ALERT_LAST_SENT and (now - _SMS_ALERT_LAST_SENT[rest_id]) < _SMS_ALERT_RATE_LIMIT_SEC:
+        print("⚠️  SMS misslyckades igen för rest_id=%s (order %s), alert undertryckt (rate limit)" % (rest_id, order_id))
+        return
+    _SMS_ALERT_LAST_SENT[rest_id] = now
+    user_key = PUSHOVER_ALERTS_USER_KEY or PUSHOVER_USER_KEY
+    token = PUSHOVER_ALERTS_TOKEN or PUSHOVER_API_TOKEN
+    if not user_key or not token:
+        print("⚠️  SMS misslyckades för order %s, rest_id=%s: %s (Pushover ej konfigurerad, ingen alert)" % (order_id, rest_id, error_msg))
+        return
+    msg = "[ALERT] SMS misslyckades – order_id %s, rest_id %s, fel: %s" % (order_id, rest_id, (error_msg or "okänt")[:200])
+    try:
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={"user": user_key, "token": token, "message": msg, "title": "SwedenVoice SMS-fel"},
+            timeout=5,
+        )
+    except Exception as e:
+        print("⚠️  SMS-fel-alert kunde inte skickas: %s" % e)
+
+
+def _run_sms_and_alert_on_failure(order_dict: dict, customer_phone: Optional[str], rest_id: str) -> None:
+    """Körs i bakgrunden: skicka SMS; vid fel skicka alert till admin. Tar order som dict (order.model_dump())."""
+    try:
+        order = Order.model_validate(order_dict)
+    except Exception as e:
+        print("⚠️  Background SMS: kunde inte bygga Order från dict: %s" % e)
+        _send_sms_failure_alert(rest_id, order_dict.get("order_id", "?"), str(e))
+        return
+    ok = send_sms_order_confirmation(order, customer_phone or "")
+    if not ok:
+        _send_sms_failure_alert(rest_id, order.order_id, "Vonage returnerade fel eller ingen telefon")
+
+
+def schedule_sms_with_alert_on_failure(
+    background_tasks: BackgroundTasks,
+    order: Order,
+    customer_phone: Optional[str],
+    rest_id: str,
+) -> None:
+    """Lägg SMS i bakgrunden; vid fel får admin en Pushover-alert. Använd i webhook och place_order."""
+    background_tasks.add_task(_run_sms_and_alert_on_failure, order.model_dump(), customer_phone, rest_id)
+
+
 def _token_bucket_allow(rest_id: str) -> bool:
     """Returnera True om anrop ska tillåtas (token bucket). Fas 2: per-tenant-parametrar från config-cache."""
     now = time.time()
@@ -1004,7 +1055,7 @@ def _process_place_order(items: List[OrderItem], special_requests: Optional[str]
 
 
 @app.post("/place_order")
-async def place_order(request: Request):
+async def place_order(request: Request, background_tasks: BackgroundTasks):
     """
     Main order placement endpoint - Called by Vapi tool OR direct API.
     Supports both Vapi tool-calls format and direct JSON format.
@@ -1072,17 +1123,8 @@ async def place_order(request: Request):
                                 "total_price": order.total_price
                             })
                         })
-                        try:
-                            print("=== SMS CHECKPOINT A (i /place_order) ===")
-                            print(f"DEBUG SMS [/place_order]: Sending SMS to: {customer_phone}")
-                            if customer_phone:
-                                print("=== SMS CHECKPOINT B (innan Vonage i /place_order) ===")
-                                sms_result = send_sms_order_confirmation(order, customer_phone)
-                                print(f"=== SMS CHECKPOINT C: Vonage result={sms_result} ===")
-                            else:
-                                print("DEBUG SMS [/place_order]: Ingen kundtelefon – SMS ej skickat")
-                        except Exception as sms_err:
-                            print(f"⚠️  SMS-orderbekräftelse misslyckades: {sms_err}")
+                        if customer_phone:
+                            schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
                     except Exception as e:
                         if _circuit_breaker_record_failure(rest_id):
                             _send_circuit_breaker_alert(rest_id)
@@ -1260,7 +1302,7 @@ async def admin_soft_delete_tenant(rest_id: str, request: Request):
 
 @app.post("/vapi/webhook")
 @app.post("/vapi-webhook")
-async def vapi_webhook(request: Request):
+async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Vapi webhook – tenant-blind, request-isolerad.
     - rest_id från query (?rest_id=...) eller body → lookup i Supabase restaurants → (restaurant_id, restaurant_uuid).
@@ -1335,19 +1377,10 @@ async def vapi_webhook(request: Request):
                         "result": json.dumps({"success": True, "order_id": order.order_id})
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
-                    print("=== SMS CHECKPOINT 1 ===")
-                    try:
-                        print("=== SMS CHECKPOINT 2 ===")
-                        print(f"DEBUG SMS: Sending SMS to: {customer_phone}")
-                        if customer_phone:
-                            print("=== SMS CHECKPOINT 3 (innan Vonage-anrop) ===")
-                            sms_result = send_sms_order_confirmation(order, customer_phone)
-                            print(f"=== SMS CHECKPOINT 4 (efter Vonage): result={sms_result} ===")
-                        else:
-                            print("⚠️  Ingen kundtelefon i webhook – SMS ej skickat")
-                            print("   → Vapi skickar kanske inte caller-nummer i tool-calls. Kolla DEBUG SMS-raden ovan för payload-struktur.")
-                    except Exception as sms_err:
-                        print(f"⚠️  SMS-orderbekräftelse misslyckades (påverkar inte order): {sms_err}")
+                    if customer_phone:
+                        schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
+                    else:
+                        print("⚠️  Ingen kundtelefon i webhook – SMS ej schemalagt")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
                     if _circuit_breaker_record_failure(rest_id):
