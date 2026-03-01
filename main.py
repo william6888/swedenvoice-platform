@@ -264,6 +264,62 @@ def find_menu_item(item_id: int, rest_id: Optional[str] = None):
                 return item
     return None
 
+
+def find_menu_item_by_name(rest_id: Optional[str], name: str):
+    """Find menu item by name (case-insensitive). Exact match first, then startswith, then 'in'. Return same dict as menu (id, name, price)."""
+    if not name or not isinstance(name, str):
+        return None
+    norm = name.strip().lower()
+    if not norm:
+        return None
+    menu = get_menu_cached(rest_id)
+    exact = []
+    startswith = []
+    contains = []
+    for category in menu.values():
+        for item in category:
+            mn = (item.get("name") or "").strip().lower()
+            if not mn:
+                continue
+            if mn == norm:
+                exact.append(item)
+            elif mn.startswith(norm) or norm.startswith(mn):
+                startswith.append(item)
+            elif norm in mn or mn in norm:
+                contains.append(item)
+    if exact:
+        return exact[0]
+    if startswith:
+        return startswith[0]
+    if contains:
+        return contains[0]
+    return None
+
+
+def _resolve_items_to_ids(items_data: list, rest_id: Optional[str] = None) -> list:
+    """Resolve items that have name but no id (LLM skickar namn; vi sätter id från menyn). På plats; returnerar samma lista."""
+    for d in items_data:
+        if not isinstance(d, dict):
+            continue
+        if d.get("id") is not None:
+            continue
+        name = (d.get("name") or "").strip()
+        if not name:
+            continue
+        mi = find_menu_item_by_name(rest_id, name)
+        if mi:
+            d["id"] = mi["id"]
+            d["name"] = mi["name"]
+    return items_data
+
+
+def _items_all_have_id(items_data: list) -> tuple:
+    """Return (True, None) if all items have id; else (False, error_message)."""
+    missing = [d.get("name") or "?" for d in items_data if isinstance(d, dict) and d.get("id") is None]
+    if not missing:
+        return (True, None)
+    return (False, "Kunde inte matcha rätt: " + ", ".join(missing[:5]))
+
 def calculate_total_price(items: List[OrderItem], rest_id: Optional[str] = None) -> float:
     """Calculate total price from order items. rest_id = vilken pizzeria (rätt meny, rätt priser)."""
     total = 0.0
@@ -1255,6 +1311,15 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                             "result": json.dumps({"success": False, "error": "No items in order"})
                         })
                         continue
+                    items_data = _resolve_items_to_ids(items_data, rest_id)
+                    ok, err = _items_all_have_id(items_data)
+                    if not ok:
+                        results.append({
+                            "name": "place_order",
+                            "toolCallId": tool_call_id,
+                            "result": json.dumps({"success": False, "error": err})
+                        })
+                        continue
                     try:
                         items = [OrderItem(**it) for it in items_data]
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
@@ -1525,6 +1590,15 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                         "name": "place_order",
                         "toolCallId": tool_call_id,
                         "result": json.dumps({"success": False, "error": "No items"})
+                    })
+                    continue
+                items_data = _resolve_items_to_ids(items_data, rest_id)
+                ok, err = _items_all_have_id(items_data)
+                if not ok:
+                    results.append({
+                        "name": "place_order",
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps({"success": False, "error": err})
                     })
                     continue
                 try:
