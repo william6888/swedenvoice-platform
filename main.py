@@ -115,11 +115,19 @@ async def log_post_path(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup_debug():
-    """DEBUG: Logga Vonage env vid app-start (körs också på Railway)."""
+    """DEBUG: Logga env och verifiera Supabase-åtkomst vid app-start (körs också på Railway)."""
     print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
     print(f"Fas 1: POST /admin/tenants/{{rest_id}}/invalidate (ADMIN_SECRET={'SET' if ADMIN_SECRET else 'MISSING'})")
+    # Kontrollera att vi kan läsa restaurants (RLS kräver service_role; anon får 0 rader)
+    if _supabase_client:
+        try:
+            r = _supabase_client.table("restaurants").select("id").limit(1).execute()
+            if not (r.data and len(r.data) > 0):
+                print("⚠️  Supabase restaurants returnerade 0 rader. Om du aktiverat RLS: sätt SUPABASE_KEY till service_role (inte anon) i Railway.")
+        except Exception as e:
+            print("⚠️  Supabase restaurants-check misslyckades: %s – kontrollera SUPABASE_KEY (använd service_role om RLS är på)" % e)
 
 # ==================== DATA MODELS ====================
 
@@ -359,12 +367,21 @@ def _insert_order_to_supabase(
     restaurant_uuid: Optional[str] = None,
 ) -> bool:
     """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert.
-    restaurant_uuid: om None används RESTAURANT_UUID (bakåtkompat)."""
+    restaurant_uuid: om None används RESTAURANT_UUID (bakåtkompat).
+    Om kolumnen special_instructions saknas i DB försöker vi fallback utan den (order sparas ändå)."""
     if not _supabase_client:
         print("⚠️  Supabase insert SKIPPED: _supabase_client is None (SUPABASE_URL/SUPABASE_KEY saknas eller init misslyckades vid start)")
         return False
-    try:
-        items_json = [{"id": i.id, "name": i.name, "quantity": i.quantity, "price": i.price} for i in order.items]
+
+    def _build_row(include_special_instructions: bool, include_notes: bool):
+        items_json = []
+        for i in order.items:
+            item = {"id": i.id, "name": i.name, "quantity": i.quantity, "price": i.price}
+            if include_notes:
+                notes = (getattr(i, "special_requests", None) or "").strip() or None
+                if notes:
+                    item["notes"] = notes
+            items_json.append(item)
         row = {
             "restaurant_id": restaurant_id or "default",
             "customer_name": customer_name or "",
@@ -374,25 +391,44 @@ def _insert_order_to_supabase(
             "status": "NYA",
             "raw_transcript": raw_transcript or "",
         }
+        if include_special_instructions:
+            row["special_instructions"] = (order.special_requests or "").strip() or ""
         uuid_val = restaurant_uuid or RESTAURANT_UUID
         if uuid_val:
             row["restaurant_uuid"] = uuid_val
+        return row
+
+    def _do_insert(row: dict):
         resp = _supabase_client.table("orders").insert(row).execute()
-        # Detaljerad logg (Supabase AI-felsökning)
         err = getattr(resp, "error", None)
-        data = getattr(resp, "data", None)
-        status_code = getattr(resp, "status_code", None)
-        auth_preview = "eyJ (JWT)" if SUPABASE_KEY and str(SUPABASE_KEY).strip().startswith("eyJ") else "annat"
-        print(f"SUPABASE RESP: status_code={status_code} | data={data} | error={err}")
-        if data is None and err is None:
-            print(f"SUPABASE RAW resp type: {type(resp).__name__}, attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
-        print(f"SUPABASE AUTH: {auth_preview}")
         if err:
-            print(f"⚠️  Supabase insert FAILED: {err}")
-            return False
+            raise RuntimeError(str(err))
+        return True
+
+    # Först med special_instructions och notes (full funktionalitet)
+    try:
+        row = _build_row(include_special_instructions=True, include_notes=True)
+        _do_insert(row)
         print(f"✅ Order {order.order_id} sparad till Supabase (restaurant_id={restaurant_id})")
         return True
     except Exception as e:
+        err_str = str(e).lower()
+        # Kolumn saknas eller liknande – försök utan special_instructions och notes
+        is_column_error = (
+            "special_instructions" in err_str
+            or "notes" in err_str
+            or ("column" in err_str and ("does not exist" in err_str or "undefined_column" in err_str))
+        )
+        if is_column_error:
+            print("⚠️  Supabase: kolumn special_instructions eller notes saknas – sparar utan dem. Kör SUPABASE_ADD_SPECIAL_INSTRUCTIONS.sql i Supabase för full funktion.")
+            try:
+                row = _build_row(include_special_instructions=False, include_notes=False)
+                _do_insert(row)
+                print(f"✅ Order {order.order_id} sparad till Supabase (fallback, restaurant_id={restaurant_id})")
+                return True
+            except Exception as e2:
+                print(f"⚠️  Supabase insert failed (fallback): {e2}")
+                return False
         print(f"⚠️  Supabase insert failed: {e}")
         return False
 
@@ -520,6 +556,36 @@ def _get_call_id_from_webhook(body: dict) -> Optional[str]:
     if raw is None:
         return None
     return str(raw).strip() or None
+
+
+def _get_raw_transcript_from_webhook(body: dict) -> str:
+    """Hämta rå transkript från Vapi webhook-body om det finns. Returnerar tom sträng om inte."""
+    if not isinstance(body, dict):
+        return ""
+    msg = body.get("message") or {}
+    call = (msg.get("call") if isinstance(msg, dict) else None) or body.get("call") or {}
+    # Vanliga ställen Vapi kan skicka transkript
+    for val in (
+        msg.get("transcript") if isinstance(msg, dict) else None,
+        msg.get("content") if isinstance(msg, dict) else None,
+        call.get("transcript") if isinstance(call, dict) else None,
+        body.get("transcript"),
+    ):
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, list):
+            # content kan vara lista med {type, content/text}
+            parts = []
+            for item in val:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+                elif isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+            if parts:
+                return "\n".join(parts)
+    return ""
 
 
 def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid: Optional[str]) -> None:
@@ -1194,7 +1260,8 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
                         send_pushover_notification(order, customer_phone=customer_phone)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
-                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                        raw_transcript = _get_raw_transcript_from_webhook(body)
+                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
                         _circuit_breaker_record_success(rest_id)
                         results.append({
                             "name": "place_order",
@@ -1465,7 +1532,8 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
                     send_pushover_notification(order, customer_phone=customer_phone)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
-                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, restaurant_uuid=restaurant_uuid)
+                    raw_transcript = _get_raw_transcript_from_webhook(body)
+                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
                     _circuit_breaker_record_success(rest_id)
                     results.append({
                         "name": "place_order",

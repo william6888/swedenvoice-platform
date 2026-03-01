@@ -54,6 +54,9 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 | **SNABBSTART.txt** | Kort snabbstart. |
 | **NUVARANDE_STATUS.md** | Status (t.ex. väntar på Vapi-nyckel). |
 | **PROJECT_SUMMARY.txt** | Sammanfattning av levererat (filstruktur, features, hur man kör). |
+| **ONBOARDING_NY_PIZZERIA.md** | Steg-för-steg checklista för att lägga till en ny pizzeria/restaurang (Supabase, meny, Vapi, alla verktyg). |
+| **PROBLEM_OCH_ATgarder.md** | Nuvarande problem, vad ändringar orsakat, åtgärder. Backend är tolerant (fallback vid saknad kolumn; startvarning vid RLS/anon). |
+| **SUPABASE_ADD_SPECIAL_INSTRUCTIONS.sql** | Kör en gång i Supabase: lägger till kolumnen special_instructions i orders. |
 
 ---
 
@@ -82,6 +85,14 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 - **Tool:** `place_order`, POST, URL = din publika URL + `/place_order`. Schema: `items` (array med `id`, `name`, `quantity`), `special_requests` (string, optional).
 - **System prompt:** Kopiera hela innehållet från `system_prompt.md` till Vapi Assistant.
 - **Röst:** ElevenLabs + Jonas (Voice ID `e6OiUVixGLmvtdn2GJYE`) eller Cartesia + svensk röst för lägre latens. Språk: Swedish (sv-SE).
+
+---
+
+## Supabase (KDS / multi-tenant)
+
+- **Railway:** Sätt `SUPABASE_KEY` till **service_role**-nyckeln (inte anon), annars kan backend inte läsa `restaurants` efter RLS. Vid start varnar appen om restaurants returnerar 0 rader.
+- **special_instructions:** Kör en gång i Supabase SQL Editor: `ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS special_instructions text;` (fil: `SUPABASE_ADD_SPECIAL_INSTRUCTIONS.sql`). Om kolumnen saknas sparar backend order ändå (fallback utan fältet).
+- **Problem och åtgärder:** Se PROBLEM_OCH_ATgarder.md.
 
 ---
 
