@@ -72,6 +72,9 @@ PORT = int(os.getenv("PORT", 8000))
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
 PUSHOVER_ALERTS_USER_KEY = os.getenv("PUSHOVER_ALERTS_USER_KEY", PUSHOVER_USER_KEY or "").strip()
 PUSHOVER_ALERTS_TOKEN = os.getenv("PUSHOVER_ALERTS_TOKEN", PUSHOVER_API_TOKEN or "").strip()
+# Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
+# I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
+WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
 
 # Fas 2: Kryptering av tenant-nycklar (restaurant_secrets)
 ENCRYPTION_SECRET = os.getenv("ENCRYPTION_SECRET", "").strip()
@@ -106,6 +109,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/vapi/webhook", "/vapi-webhook"})
+
+
+@app.middleware("http")
+async def verify_vapi_webhook_secret(request: Request, call_next):
+    """Om WEBHOOK_SHARED_SECRET är satt: kräv Bearer eller X-Webhook-Secret på Vapi-endpoints."""
+    if request.method != "POST" or request.url.path not in _VAPI_PROTECTED_PATHS:
+        return await call_next(request)
+    if not WEBHOOK_SHARED_SECRET:
+        return await call_next(request)
+    auth = (request.headers.get("authorization") or "").strip()
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    header_secret = (request.headers.get("x-webhook-secret") or "").strip()
+    if bearer == WEBHOOK_SHARED_SECRET or header_secret == WEBHOOK_SHARED_SECRET:
+        return await call_next(request)
+    return JSONResponse(
+        content={"detail": "Unauthorized", "hint": "Set X-Webhook-Secret or Authorization: Bearer to match WEBHOOK_SHARED_SECRET"},
+        status_code=401,
+    )
+
+
 @app.middleware("http")
 async def log_post_path(request: Request, call_next):
     """Logga POST till place_order/webhook – spåra var tool-calls går."""
@@ -120,6 +144,7 @@ async def startup_debug():
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
     print(f"Fas 1: POST /admin/tenants/{{rest_id}}/invalidate (ADMIN_SECRET={'SET' if ADMIN_SECRET else 'MISSING'})")
+    print(f"WEBHOOK_SHARED_SECRET: {'SET (Vapi måste skicka header)' if WEBHOOK_SHARED_SECRET else 'NOT SET — /place_order och /vapi/webhook är öppna'}")
     # Kontrollera att vi kan läsa restaurants (RLS kräver service_role; anon får 0 rader)
     if _supabase_client:
         try:

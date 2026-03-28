@@ -45,3 +45,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Lokala instruktioner med webhook-hemlighet (genereras av scripts/setup_webhook_auth.py)
+.webhook_auth_instructions.txt

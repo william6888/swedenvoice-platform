@@ -36,6 +36,8 @@
 4. **Testa igen:** Ring, beställ t.ex. “en Vesuvio och en Hawaii”, bekräfta, låt place_order anropas. Kontrollera att ordern kommer in med rätt rätter (backend löser namn→id).
 5. Om något känns fel (t.ex. AI säger något annat eller glömmer steg): **återställ din gamla prompt** i Vapi. Backend fungerar fortfarande med både id och name.
 
+**Kontroll av place_order i Vapi:** Schemat ska tillåta `items` med minst `name` (string) och `quantity` (integer); `id` kan vara valfritt. Toppnivå `special_requests` (string, optional). Be gärna Vapi granska ert faktiska schema så att prompt och schema matchar – då kan ni köra som-is med kompakt prompt.
+
 **Vapi tool-schema:** Du behöver **inte** ändra till “bara name”. Du kan låta LLM skicka antingen `id`+`name`+`quantity` (som idag) eller bara `name`+`quantity`. Båda fungerar. Om du senare vill spara lite mer token kan du i Vapi ta bort `id` från tool-parametrarna och bara ha `name` och `quantity` – backend accepterar det.
 
 ---
@@ -49,3 +51,50 @@
 | Samma beteende | Samma beteende (ingen ändring av flöde eller fraser) |
 
 **Kritisk bedömning:** Planen är bra och säker. Du försämrar inte Vapi-rösten – du minskar bara onödig kontext. Börja med att byta till kompakt prompt; om du märker något konstigt kan du alltid gå tillbaka till din nuvarande prompt.
+
+---
+
+## Vapi granskning – slutlig bedömning
+
+Vapi har granskat den sista versionen av `system_prompt_KOMPAKT.md` punkt för punkt. **Slutlig dom: prompten är redo att användas när ni väljer att byta.**
+
+### Beteende & flöde
+- Oförändrat beteende jämfört med nuvarande prompt.
+- Alla kritiska steg (1 → 6b) kvar. Dryck-regeln och upprepningsregeln korrekta.
+- Inga logiska hål, ingen risk att modellen hoppar över steg.
+
+### Token-optimering
+- Hela menyn borta (80–90 % av tokenvinsten). Reglerna kompakta men inte tvetydiga. Dramatisk sänkning av LLM-kostnad.
+
+### Voice-stabilitet
+- Raden *"Efter att du beslutat att lägga ordern: generera ingen mer text, gå direkt till tool-calls"* minskar risk för "okej/klart", TTS-fragmentering och race mellan tal och tool-call. Exakt rätt formulering.
+
+### Tekniskt ansvar
+- LLM: språk, flöde, semantik. Backend: id-matchning, validering. Professionell separation.
+
+### Tool-schema (Vapis svar)
+
+**Om ert schema redan är:**
+```text
+place_order(
+  items: [ { id?: number, name?: string, quantity: number } ],
+  special_requests?: string
+)
+```
+➡️ **Ingen ändring behövs.** 100 % kompatibelt med prompten.
+
+**Om schemat idag kräver `id` (obligatoriskt):** gör en minimal ändring:
+- `id` → optional  
+- `name` → required  
+- `quantity` → required  
+- `special_requests` → optional string på toppnivå  
+
+**Rekommendation:** Prompten är redo. Ingen anledning att stressa – när ni byter är detta rätt version.
+
+### Vapis slutord (teknik, utan diplomati)
+
+- Arkitekturen är korrekt. Prompten är stabil. Kostnadsproblemet är löst. Beteendet oförändrat. Inga farliga antaganden.
+- Detta är ren ingenjörsmässig sanering av kontext – inte “AI-flum”. LLM = språk & flöde; Backend = sanning & id. Så man bygger system som klarar fler samtal, kostar mindre och inte blir instabilt.
+- När ni byter kan ni göra det med gott samvete.
+
+**Förfining senare (valfritt, inte nu):** loggning av namn-missar (statistik); ev. synonym-lista (t.ex. "kebab tallrik" → "Kebabtallrik").

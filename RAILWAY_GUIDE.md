@@ -61,7 +61,7 @@ I Railway Dashboard → ditt projekt → Variables, lägg till (kopiera från .e
 | SUPABASE_KEY | (service_role JWT från .env) |
 | VONAGE_API_KEY | (från .env) |
 | VONAGE_API_SECRET | (från .env) |
-| VONAGE_FROM_NUMBER | (t.ex. +46790952699) |
+| VONAGE_FROM_NUMBER | E.164, t.ex. `+46769439831` (ditt Vonage SMS-avsändarnummer) |
 
 ## 5. Uppdatera Vapi
 

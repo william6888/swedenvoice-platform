@@ -4,7 +4,14 @@ Testa webhook mot RAILWAY (inte localhost).
 Uppdatera RAILWAY_URL nedan om du har annan URL.
 """
 import json
+import os
 import requests
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 RAILWAY_URL = "https://web-production-a9a48.up.railway.app"
 # Tenant-blind: lägg till ?rest_id=Gislegrillen_01 (eller annat external_id) för multi-tenant-test
@@ -32,8 +39,13 @@ def main():
     print("📤 Skickar till RAILWAY:", URL)
     print("   Om lyckat: Pushover, SMS, Supabase + Lovable")
     print()
+    secret = (os.environ.get("WEBHOOK_SHARED_SECRET") or "").strip()
+    headers = {}
+    if secret:
+        headers["X-Webhook-Secret"] = secret
+        print("   (använder WEBHOOK_SHARED_SECRET från miljö)")
     try:
-        r = requests.post(URL, json=payload, timeout=15)
+        r = requests.post(URL, json=payload, headers=headers, timeout=15)
         print(f"Status: {r.status_code}")
         print(f"Svar: {r.text[:600]}")
         if r.status_code == 200:

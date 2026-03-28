@@ -48,6 +48,9 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 | **README.md** | Översikt, setup, endpoints. |
 | **QUICKSTART.md** | Snabbstart på engelska. |
 | **VAPI_SETUP_GUIDE.md** | Steg-för-steg Vapi: Assistant, Voice (ElevenLabs Jonas / Cartesia för låg latens), Tool `place_order`, webhook, telefonnummer. Inkl. felsökning dålig svenska/robotröst. |
+| **VAPI_PLACE_ORDER_OCH_SERVER_URL.md** | Ska `place_order` peka på Railway? Tool vs assistant server URL, timeouts, kallstart, idempotency – checklista och risker (stämmer med Vapis egen varningslista). |
+| **WEBHOOK_AUTH_SETUP.md** | `WEBHOOK_SHARED_SECRET`: säkra POST `/place_order` och `/vapi/webhook` med header/Bearer; tom = öppet (bakåtkompatibelt). |
+| **ENKEL_WEBHOOK_AUTH.md** | Kort 3-stegsguide; kör `python3 scripts/setup_webhook_auth.py` för färdig text till Railway + Vapi. |
 | **KOMPLETT_GUIDE.md** | Komplett svensk guide: Railway, .env, Vapi, Tool-schema, röst (ElevenLabs/Cartesia), felsökning. |
 | **RAILWAY_GUIDE.md** | Steg-för-steg: deploya till Railway, Vapi-URL. |
 | **STARTA_SYSTEMET.md** | Starta systemet på svenska. |
