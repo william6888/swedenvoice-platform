@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 
+from timing_utils import RequestTimer
+
 # Load .env från samma mapp som main.py (så ADMIN_SECRET m.m. hittas oavsett arbetskatalog)
 _env_path = Path(__file__).resolve().parent / ".env"
 _load_ok = load_dotenv(dotenv_path=str(_env_path))
@@ -1562,9 +1564,15 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
     - call_id (message.call.id) sparas tillsammans med restaurant i cache så att place_order alltid får rätt tenant (även vid separata anrop).
     - place_order använder _get_restaurant_for_webhook (cache eller lookup) och sparar order med rätt restaurant_uuid.
     - Request-isolering: vid alla undantag returneras 200 med säkert svar (ingen 500, ingen domino).
+    - Timing: emits one JSON line per request to stdout (Railway deployment logs).
     """
+    timer = RequestTimer(path=request.url.path, method=request.method)
+    _status_code = 200
+    _error: Optional[str] = None
     try:
-        body = await request.json()
+        with timer.measure("json_parse"):
+            body = await request.json()
+
         print(f">>> RAW INCOMING: path=/vapi/webhook, content_length={request.headers.get('content-length')}, type={body.get('message', {}).get('type')}")
         print(f"FULL BODY KEYS: {json.dumps(list(body.keys()))}")
         print(f"MESSAGE TYPE: {body.get('message') and body['message'].get('type')}")
@@ -1586,16 +1594,20 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
         # Handle tool-calls (stödjer toolCallList och toolWithToolCallList)
         if event_type == "tool-calls":
             # Fas 1: rest_id för circuit breaker och token bucket (från request/body eller call_id-cache)
-            rest_id = _get_rest_id_from_request(request, body)
-            call_id = _get_call_id_from_webhook(body)
-            if not rest_id and call_id and call_id in _CALL_RESTAURANT_CACHE:
-                rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
-            rest_id = rest_id or "Gislegrillen_01"
-            if not _circuit_breaker_allow(rest_id):
-                return JSONResponse(content={"results": [{"error": "Temporärt fel. Försök igen om en minut."}]}, status_code=200)
-            if not _token_bucket_allow(rest_id):
-                return JSONResponse(content={"results": [{"error": "För många anrop. Vänta en stund."}]}, status_code=200)
-            restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+            with timer.measure("auth_and_ratelimit"):
+                rest_id = _get_rest_id_from_request(request, body)
+                call_id = _get_call_id_from_webhook(body)
+                if not rest_id and call_id and call_id in _CALL_RESTAURANT_CACHE:
+                    rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
+                rest_id = rest_id or "Gislegrillen_01"
+                if not _circuit_breaker_allow(rest_id):
+                    return JSONResponse(content={"results": [{"error": "Temporärt fel. Försök igen om en minut."}]}, status_code=200)
+                if not _token_bucket_allow(rest_id):
+                    return JSONResponse(content={"results": [{"error": "För många anrop. Vänta en stund."}]}, status_code=200)
+
+            with timer.measure("supabase_select_restaurant"):
+                restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+
             if restaurant_id is None and restaurant_uuid is None:
                 return JSONResponse(content={"results": [{"error": "Restaurangen kunde inte hittas."}]}, status_code=200)
             if call_id:
@@ -1617,7 +1629,10 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                         "result": json.dumps({"success": False, "error": "No items"})
                     })
                     continue
-                items_data = _resolve_items_to_ids(items_data, rest_id)
+
+                with timer.measure("item_mapping"):
+                    items_data = _resolve_items_to_ids(items_data, rest_id)
+
                 ok, err = _items_all_have_id(items_data)
                 if not ok:
                     results.append({
@@ -1628,11 +1643,19 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     continue
                 try:
                     items = [OrderItem(**it) for it in items_data]
-                    order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
-                    send_pushover_notification(order, customer_phone=customer_phone)
+
+                    with timer.measure("process_place_order"):
+                        order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
+
+                    with timer.measure("pushover_notification"):
+                        send_pushover_notification(order, customer_phone=customer_phone)
+
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     raw_transcript = _get_raw_transcript_from_webhook(body)
-                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
+
+                    with timer.measure("supabase_insert_order"):
+                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
+
                     _circuit_breaker_record_success(rest_id)
                     results.append({
                         "name": "place_order",
@@ -1641,11 +1664,14 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
                     if customer_phone:
-                        schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
+                        # SMS runs in background – we record scheduling time only (not Vonage network time)
+                        with timer.measure("sms_schedule"):
+                            schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
                     else:
                         print("⚠️  Ingen kundtelefon i webhook – SMS ej schemalagt")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
+                    _error = str(e)
                     if _circuit_breaker_record_failure(rest_id):
                         _send_circuit_breaker_alert(rest_id)
                     results.append({
@@ -1655,17 +1681,20 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     })
             if results:
                 return JSONResponse(content={"results": results})
-        
+
         print(f"   Event: {event_type}")
         return JSONResponse(content={"success": True, "event": event_type})
-        
+
     except Exception as e:
         print(f"❌ Vapi webhook error: {e}")
+        _error = str(e)
         # Request-isolering: returnera alltid 200 så att processen inte kraschar och Vapi inte retry:ar i oändlighet
         return JSONResponse(
             content={"success": False, "message": "Något gick fel. Försök igen."},
             status_code=200,
         )
+    finally:
+        timer.log(status_code=_status_code, error=_error)
 
 # ==================== SERVER STARTUP ====================
 
