@@ -1,6 +1,6 @@
 """
 Gislegrillen Voice AI Order System
-FastAPI backend for Vapi.ai integration with Groq LLM
+FastAPI backend for Vapi.ai integration
 """
 
 import base64
@@ -60,9 +60,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 # Configuration
 VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "")
-PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN", "")
 VONAGE_API_KEY = os.getenv("VONAGE_API_KEY", "")
 VONAGE_API_SECRET = os.getenv("VONAGE_API_SECRET", "")
 VONAGE_FROM_NUMBER = os.getenv("VONAGE_FROM_NUMBER", "")
@@ -70,8 +67,6 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 # Fas 1 Safety Net: admin-endpoint och alert
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
-PUSHOVER_ALERTS_USER_KEY = os.getenv("PUSHOVER_ALERTS_USER_KEY", PUSHOVER_USER_KEY or "").strip()
-PUSHOVER_ALERTS_TOKEN = os.getenv("PUSHOVER_ALERTS_TOKEN", PUSHOVER_API_TOKEN or "").strip()
 # Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
 # I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
@@ -379,65 +374,6 @@ def print_kitchen_ticket(order: Order):
     print("="*60)
     print(f"STATUS: {order.status.upper()}")
     print("="*60 + "\n")
-
-def send_pushover_notification(order: Order, customer_phone: Optional[str] = None):
-    """Send push notification via Pushover API. Inkluderar kundens telefon om angiven."""
-    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
-        print("⚠️  Pushover credentials not configured. Skipping notification.")
-        return False
-
-    print(f"📤 Skickar Pushover-notis för order {order.order_id}... (customer_phone={customer_phone})")
-    message = f"🔔 Ny beställning!\n\n"
-    message += f"Order: {order.order_id}\n"
-    message += f"Tid: {order.timestamp}\n"
-    if customer_phone:
-        message += f"Telefon: {customer_phone}\n"
-    message += "\n"
-    for item in order.items:
-        message += f"• {item.quantity}x {item.name}\n"
-    if order.special_requests:
-        message += f"\n⚠️ Special: {order.special_requests}\n"
-    message += f"\nTotalt: {order.total_price} kr"
-
-    for attempt in range(2):
-        try:
-            response = requests.post(
-                "https://api.pushover.net/1/messages.json",
-                data={
-                    "token": PUSHOVER_API_TOKEN,
-                    "user": PUSHOVER_USER_KEY,
-                    "title": "Gislegrillen - Ny Order",
-                    "message": message,
-                    "priority": 1,
-                    "sound": "cashregister"
-                },
-                timeout=10
-            )
-            if response.status_code == 200:
-                print("✅ Pushover notification sent successfully!")
-                return True
-            err = response.text
-            print(f"⚠️  Pushover FAILED (HTTP {response.status_code}): {err}")
-            try:
-                err_json = response.json()
-                if "errors" in err_json:
-                    print(f"   Pushover errors: {err_json['errors']}")
-                if "limit" in err.lower() or "rate" in err.lower():
-                    print("   💡 Tip: Pushover har månadsgräns (10 000/mån). Kolla pushover.net")
-            except Exception:
-                pass
-            if attempt == 0:
-                time.sleep(1)
-                continue
-            return False
-        except Exception as e:
-            print(f"❌ Pushover-fel: {e}")
-            if attempt == 0:
-                time.sleep(1)
-                continue
-            return False
-    return False
-
 
 def _insert_order_to_supabase(
     order: Order,
@@ -940,24 +876,11 @@ def _circuit_breaker_record_success(rest_id: str) -> None:
 
 
 def _send_circuit_breaker_alert(rest_id: str) -> None:
-    """Skicka notis när circuit breaker öppnas (Pushover)."""
-    if not PUSHOVER_ALERTS_USER_KEY or not PUSHOVER_ALERTS_TOKEN:
-        print("⚠️  Circuit breaker öppnad för rest_id=%s men PUSHOVER_ALERTS_* ej satt" % rest_id)
-        return
-    try:
-        requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={
-                "user": PUSHOVER_ALERTS_USER_KEY,
-                "token": PUSHOVER_ALERTS_TOKEN,
-                "message": "[ALERT] Circuit breaker ÖPPNAD för rest_id=%s – %d fel på %d s. Kontrollera konfiguration."
-                % (rest_id, _CIRCUIT_FAIL_THRESHOLD, _CIRCUIT_WINDOW_SEC),
-                "title": "SwedenVoice Circuit Breaker",
-            },
-            timeout=5,
-        )
-    except Exception as e:
-        print("⚠️  Circuit breaker alert failed: %s" % e)
+    """Logga varning när circuit breaker öppnas."""
+    print(
+        "⚠️  [ALERT] Circuit breaker ÖPPNAD för rest_id=%s – %d fel på %d s. Kontrollera konfiguration."
+        % (rest_id, _CIRCUIT_FAIL_THRESHOLD, _CIRCUIT_WINDOW_SEC)
+    )
 
 
 # Diamond Polish Fas 1: SMS i bakgrunden + alert vid fel (rate-limit per rest_id)
@@ -966,26 +889,13 @@ _SMS_ALERT_RATE_LIMIT_SEC = 300
 
 
 def _send_sms_failure_alert(rest_id: str, order_id: str, error_msg: str) -> None:
-    """Skicka Pushover-alert när SMS misslyckats. Rate-limit: max 1 per rest_id per 5 min. Fallback till vanlig Pushover om PUSHOVER_ALERTS_* saknas."""
+    """Logga SMS-fel. Rate-limit: max 1 per rest_id per 5 min."""
     now = time.time()
     if rest_id in _SMS_ALERT_LAST_SENT and (now - _SMS_ALERT_LAST_SENT[rest_id]) < _SMS_ALERT_RATE_LIMIT_SEC:
         print("⚠️  SMS misslyckades igen för rest_id=%s (order %s), alert undertryckt (rate limit)" % (rest_id, order_id))
         return
     _SMS_ALERT_LAST_SENT[rest_id] = now
-    user_key = PUSHOVER_ALERTS_USER_KEY or PUSHOVER_USER_KEY
-    token = PUSHOVER_ALERTS_TOKEN or PUSHOVER_API_TOKEN
-    if not user_key or not token:
-        print("⚠️  SMS misslyckades för order %s, rest_id=%s: %s (Pushover ej konfigurerad, ingen alert)" % (order_id, rest_id, error_msg))
-        return
-    msg = "[ALERT] SMS misslyckades – order_id %s, rest_id %s, fel: %s" % (order_id, rest_id, (error_msg or "okänt")[:200])
-    try:
-        requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={"user": user_key, "token": token, "message": msg, "title": "SwedenVoice SMS-fel"},
-            timeout=5,
-        )
-    except Exception as e:
-        print("⚠️  SMS-fel-alert kunde inte skickas: %s" % e)
+    print("⚠️  [ALERT] SMS misslyckades – order_id %s, rest_id %s, fel: %s" % (order_id, rest_id, (error_msg or "okänt")[:200]))
 
 
 def _run_sms_and_alert_on_failure(order_dict: dict, customer_phone: Optional[str], rest_id: str) -> None:
@@ -1239,12 +1149,10 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
 def _process_place_order(
     items: List[OrderItem],
     special_requests: Optional[str] = None,
-    customer_phone: Optional[str] = None,
-    skip_pushover: bool = False,
     rest_id: Optional[str] = None,
 ) -> Order:
-    """Process order: validate, save, print, send Pushover (om inte skip_pushover).
-    rest_id = vilken pizzeria (meny + priser). customer_phone inkluderas i Pushover när angiven."""
+    """Process order: validate, save, print kitchen ticket.
+    rest_id = vilken pizzeria (meny + priser)."""
     enriched_items = []
     per_item_specs = []
     for item in items:
@@ -1278,8 +1186,6 @@ def _process_place_order(
     orders.append(order.model_dump())
     save_orders(orders)
     print_kitchen_ticket(order)
-    if not skip_pushover:
-        send_pushover_notification(order, customer_phone=customer_phone)
     return order
 
 
@@ -1347,8 +1253,7 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         continue
                     try:
                         items = [OrderItem(**it) for it in items_data]
-                        order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
-                        send_pushover_notification(order, customer_phone=customer_phone)
+                        order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         raw_transcript = _get_raw_transcript_from_webhook(body)
                         _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
@@ -1458,40 +1363,10 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "config": {
             "vapi_configured": bool(VAPI_API_KEY),
-            "groq_configured": bool(GROQ_API_KEY),
-            "pushover_configured": bool(PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN)
+            "vonage_configured": bool(VONAGE_API_KEY and VONAGE_API_SECRET),
+            "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
         }
     })
-
-@app.get("/test_pushover")
-async def test_pushover():
-    """Test Pushover – skickar en testnotis för att verifiera konfiguration"""
-    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
-        return JSONResponse(content={
-            "success": False,
-            "error": "Pushover not configured (missing PUSHOVER_USER_KEY or PUSHOVER_API_TOKEN in .env)"
-        }, status_code=400)
-    try:
-        r = requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={
-                "token": PUSHOVER_API_TOKEN,
-                "user": PUSHOVER_USER_KEY,
-                "title": "Gislegrillen – Test",
-                "message": "Om du ser detta fungerar Pushover!",
-                "priority": 0
-            },
-            timeout=10
-        )
-        if r.status_code == 200:
-            return {"success": True, "message": "Testnotis skickad – kolla mobilen!"}
-        err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        return JSONResponse(
-            content={"success": False, "error": r.text, "pushover_errors": err.get("errors", [])},
-            status_code=400
-        )
-    except Exception as e:
-        return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
 
 # ==================== FAS 1: ADMIN (Instant Kill) ====================
 
@@ -1628,8 +1503,7 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     continue
                 try:
                     items = [OrderItem(**it) for it in items_data]
-                    order = _process_place_order(items, params.get("special_requests"), skip_pushover=True, rest_id=rest_id)
-                    send_pushover_notification(order, customer_phone=customer_phone)
+                    order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     raw_transcript = _get_raw_transcript_from_webhook(body)
                     _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
@@ -1697,10 +1571,6 @@ if __name__ == "__main__":
     # Check configuration
     if not VAPI_API_KEY:
         print("⚠️  WARNING: VAPI_API_KEY not configured!")
-    if not GROQ_API_KEY:
-        print("⚠️  WARNING: GROQ_API_KEY not configured!")
-    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
-        print("⚠️  WARNING: Pushover credentials not configured!")
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("⚠️  Supabase not configured (KDS/Lovable) – orders will not sync to Supabase")
     # DEBUG: Vonage env vars vid start
