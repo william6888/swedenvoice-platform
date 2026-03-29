@@ -2,7 +2,7 @@
   "pizzas": [
     {"id": 1, "name": "Capricciosa", "price": 125, "description": "Skinka, champinjoner"},
     {"id": 2, "name": "Vesuvio", "price": 125, "description": "Skinka"},
-    {"id": 3, "name": "Margherita", "price": 125, "description": "Tomat, ost"},
+    {"id": 3, "name": "Margherita", "aliases": ["margarita"], "price": 125, "description": "Tomat, ost"},
     {"id": 4, "name": "Capri", "price": 125, "description": "Skinka, räkor"},
     {"id": 5, "name": "Venezia", "price": 125, "description": "Köttfärs"},
     {"id": 6, "name": "Calzone", "price": 125, "description": "Skinka (inbakad)"},

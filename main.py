@@ -268,8 +268,23 @@ def _normalize_for_menu_match(s: str) -> str:
 
 
 def _build_normalized_menu_lookup(menu: dict) -> Tuple[Dict[str, dict], List[str]]:
+    """Bygg normalized_name -> menu_item.
+    Inkluderar även item['aliases'] (om lista) som extra nycklar.
+    Vid kollision mellan olika items: nyckeln läggs i collisions och tas bort ur lookup (fail-safe)."""
     lookup: Dict[str, dict] = {}
     collisions: List[str] = []
+
+    def _add_key(k: str, item: dict) -> None:
+        if not k:
+            return
+        if k in lookup and lookup[k].get("id") != item.get("id"):
+            collisions.append(k)
+            # fail-safe: disable this key entirely to avoid wrong mapping
+            lookup.pop(k, None)
+            return
+        if k not in lookup:
+            lookup[k] = item
+
     for items in menu.values():
         if not isinstance(items, list):
             continue
@@ -277,13 +292,12 @@ def _build_normalized_menu_lookup(menu: dict) -> Tuple[Dict[str, dict], List[str
             if not isinstance(item, dict):
                 continue
             raw = item.get("name") or ""
-            k = _normalize_for_menu_match(raw)
-            if not k:
-                continue
-            if k in lookup and lookup[k].get("id") != item.get("id"):
-                collisions.append(k)
-                continue
-            lookup[k] = item
+            _add_key(_normalize_for_menu_match(raw), item)
+            aliases = item.get("aliases")
+            if isinstance(aliases, list):
+                for a in aliases:
+                    if isinstance(a, str) and a.strip():
+                        _add_key(_normalize_for_menu_match(a), item)
     return lookup, collisions
 
 
@@ -300,8 +314,8 @@ def _get_normalized_menu_lookup(rest_id: Optional[str]) -> Dict[str, dict]:
     if collisions:
         uniq = list(dict.fromkeys(collisions))[:10]
         print(
-            "⚠️  Meny: flera rätter får samma normaliserade namn (första i filen vinner): %s"
-            % ", ".join(uniq)
+            "❌ Meny/alias-kollision: flera rätter delar samma normaliserade nyckel. "
+            "Nycklarna är DISABLED för säkerhets skull: %s" % ", ".join(uniq)
         )
     _MENU_NORM_LOOKUP[key] = lookup
     return lookup
@@ -353,38 +367,15 @@ def find_menu_item(item_id: int, rest_id: Optional[str] = None):
 
 
 def find_menu_item_by_name(rest_id: Optional[str], name: str):
-    """Hitta menyrad via namn. Först exakt match på normaliserat namn (bindestreck/space/unicode), sedan fuzzy på normaliserade strängar."""
+    """Hitta menyrad via namn med deterministisk matchning:
+    normalisera -> exakt lookup (inkl alias). Ingen fuzzy fallback (för att undvika felmatch)."""
     if not name or not isinstance(name, str):
         return None
     nk = _normalize_for_menu_match(name)
     if not nk:
         return None
     lookup = _get_normalized_menu_lookup(rest_id)
-    if nk in lookup:
-        return lookup[nk]
-    menu = get_menu_cached(rest_id)
-    startswith: List[Tuple[int, dict]] = []
-    contains: List[Tuple[int, dict]] = []
-    for category in menu.values():
-        if not isinstance(category, list):
-            continue
-        for item in category:
-            if not isinstance(item, dict):
-                continue
-            mk = _normalize_for_menu_match(item.get("name") or "")
-            if not mk:
-                continue
-            if mk.startswith(nk) or nk.startswith(mk):
-                startswith.append((min(len(mk), len(nk)), item))
-            elif nk in mk or mk in nk:
-                contains.append((min(len(mk), len(nk)), item))
-    if startswith:
-        startswith.sort(key=lambda x: -x[0])
-        return startswith[0][1]
-    if contains:
-        contains.sort(key=lambda x: -x[0])
-        return contains[0][1]
-    return None
+    return lookup.get(nk)
 
 
 def _resolve_items_to_ids(items_data: list, rest_id: Optional[str] = None) -> list:
