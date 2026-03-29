@@ -19,11 +19,7 @@
    - Välj **Deploy from GitHub repo**
    - Välj ditt Gislegrillen-repo
 
-3. **Lägg till variabler** (Settings → Variables):
-   - `VAPI_API_KEY` = din Vapi-nyckel
-   - `GROQ_API_KEY` = din Groq-nyckel
-   - `PUSHOVER_USER_KEY` = din Pushover user key
-   - `PUSHOVER_API_TOKEN` = din Pushover API token
+3. **Lägg till variabler** (Settings → Variables) – se tabellen nedan (minst `VAPI_API_KEY`, Supabase och ev. Vonage).
 
 4. **Generera publik URL:**
    - Settings → Networking → Generate Domain
@@ -54,9 +50,6 @@ I Railway Dashboard → ditt projekt → Variables, lägg till (kopiera från .e
 | Variabel | Värde |
 |----------|-------|
 | VAPI_API_KEY | (från .env) |
-| GROQ_API_KEY | (från .env) |
-| PUSHOVER_USER_KEY | (från .env) |
-| PUSHOVER_API_TOKEN | (från .env) |
 | SUPABASE_URL | (från .env) |
 | SUPABASE_KEY | (service_role JWT från .env) |
 | VONAGE_API_KEY | (från .env) |
@@ -73,7 +66,6 @@ I Railway Dashboard → ditt projekt → Variables, lägg till (kopiera från .e
 
 ```bash
 curl https://DIN-RAILWAY-URL.up.railway.app/health
-curl https://DIN-RAILWAY-URL.up.railway.app/test_pushover
 ```
 
 ---

@@ -17,8 +17,8 @@
 **Gislegrillen Voice AI Order System** – Ett beställningssystem för pizzeria som:
 
 1. **Tar emot samtal** via Vapi.ai (röst-AI som svarar på telefon).
-2. **AI:en** (Groq/Llama) pratar svenska, tar beställningar, bekräftar och anropar backend.
-3. **Backend** (FastAPI i `main.py`) tar emot beställningar från Vapi, sparar i `orders.json`, skickar Pushover-notis, skriver köksbong till konsolen.
+2. **AI:en** (konfigurerad i Vapi – t.ex. LLM/röst) pratar svenska, tar beställningar, bekräftar och anropar backend.
+3. **Backend** (FastAPI i `main.py`) tar emot beställningar från Vapi, sparar i `orders.json`, skriver köksbong till konsolen/loggar, kan skicka SMS (Vonage) och skriva till Supabase.
 4. **Dashboard** (`index.html`) visar beställningar i köket med status (pending/ready/completed).
 
 Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligger i `.env` (kopiera från `.env.template`).
@@ -29,12 +29,12 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 
 | Fil | Roll |
 |-----|------|
-| **main.py** | FastAPI-app: `/place_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/vapi/webhook`, `/system_prompt`, `/health`. CORS, Pushover, köksbong-utskrift. |
+| **main.py** | FastAPI-app: `/place_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/vapi/webhook`, `/system_prompt`, `/health`. CORS, köksbong i loggar, Vonage-SMS, Supabase. |
 | **index.html** | Köksdashboard – Bootstrap 5, orderkort, statusuppdatering, auto-refresh. Servas via `/dashboard`. |
 | **menu.json** | Meny (pizzor, kebabs, burgare, tillbehör, drycker) med id, namn, pris, beskrivning. |
 | **orders.json** | Sparade beställningar (persistent). |
 | **system_prompt.md** | AI-personlighet för Vapi – svenska, beställningsflöde, när verktyget `place_order` ska anropas. Kopieras till Vapi Assistant. |
-| **.env** | API-nycklar: `VAPI_API_KEY`, `GROQ_API_KEY`, `PUSHOVER_USER_KEY`, `PUSHOVER_API_TOKEN`. Optional: `HOST`, `PORT`. |
+| **.env** | API-nycklar: `VAPI_API_KEY`, Vonage (`VONAGE_*`), Supabase (`SUPABASE_URL`, `SUPABASE_KEY`), valfritt `ADMIN_SECRET`, `WEBHOOK_SHARED_SECRET`. Optional: `HOST`, `PORT`. |
 | **.env.template** | Mall för .env (inga riktiga nycklar). |
 | **requirements.txt** | Python-beroenden (fastapi, uvicorn, pydantic, requests, python-dotenv). |
 | **start_server.sh** | Startar servern lokalt (t.ex. `python main.py` / uvicorn). |
@@ -66,9 +66,9 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 ## Teknisk stack
 
 - **Backend:** Python 3, FastAPI, uvicorn, pydantic, requests, python-dotenv.
-- **Voice/LLM:** Vapi.ai (telefon + röst + styrning av samtal), Groq (Llama) som LLM i Vapi.
+- **Voice/LLM:** Vapi.ai (telefon + röst + styrning av samtal); LLM och röst väljs i Vapi-dashboarden.
 - **Röst:** ElevenLabs med Jonas (svenska) eller Cartesia för lägre latens; undvik Vapis egna röster för svenska.
-- **Notiser:** Pushover (push till mobil).
+- **SMS:** Vonage (orderbekräftelse till kund när telefon finns i webhook).
 - **Frontend:** Vanilla HTML/CSS/JS (Bootstrap 5) för dashboard.
 
 ---

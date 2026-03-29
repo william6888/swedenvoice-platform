@@ -16,7 +16,7 @@ Om Lovable och Supabase redan visar rätt beställningar behöver du inte göra 
 
 | Vad | Hur |
 |-----|-----|
-| **Pushover** | Får köket notis till mobilen när en order kommer? |
+| **Kök / ordrar** | Syns nya ordrar i Lovable/Supabase och ev. `/dashboard`? Köksbong i Railway-loggar? |
 | **SMS till kund** | Får kunden orderbekräftelse via Vonage? (Kräver att Vapi skickar kundens nummer i webhook.) |
 | **Riktigt samtal** | Ring via Vapi-assistenten, lägg en order, kolla att den syns i Lovable med rätt innehåll. |
 | **Tenant-lookup** | Öppna `https://<railway-url>/debug-tenant?rest_id=Gislegrillen_01` → ska visa `restaurant_id`, `restaurant_uuid`, `lookup_ok: true`. |

@@ -42,7 +42,7 @@ def main():
         print(f"Status: {r.status_code}")
         print(f"Svar: {r.text[:500]}")
         if r.status_code == 200:
-            print("\n✅ Test lyckades! Kolla orders.json, Supabase och Pushover.")
+            print("\n✅ Test lyckades! Kolla orders.json, Supabase och serverloggar.")
         else:
             print("\n⚠️  Fick felstatus – kolla att servern körs på port 8000")
     except requests.exceptions.ConnectionError:

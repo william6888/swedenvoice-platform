@@ -1,6 +1,6 @@
 # 🍕 Gislegrillen Voice AI Order System
 
-A production-ready, plug-and-play Voice AI ordering system for Gislegrillen pizzeria. Built with Vapi.ai for voice handling, Groq (Llama 3) as the AI brain, and FastAPI for robust backend logic.
+A production-ready, plug-and-play Voice AI ordering system for Gislegrillen pizzeria. Built with Vapi.ai for voice handling, FastAPI for backend logic, optional Vonage SMS and Supabase.
 
 ## 🎯 Features
 
@@ -8,7 +8,7 @@ A production-ready, plug-and-play Voice AI ordering system for Gislegrillen pizz
 - **Swedish AI Personality**: Professional Swedish-speaking AI with local pizzeria authenticity
 - **Smart Order Processing**: Automatic price calculation, validation, and persistence
 - **Kitchen Dashboard**: Real-time web dashboard for managing orders
-- **Push Notifications**: Instant order alerts via Pushover
+- **Kitchen visibility**: Dashboard, Supabase/Lovable, and console/Railway logs for kitchen tickets
 - **Production Ready**: Comprehensive error handling, logging, and monitoring
 
 ## 📁 Project Structure
@@ -32,8 +32,7 @@ gislegrillen-order-system/
 
 - Python 3.8+
 - Vapi.ai account (https://vapi.ai)
-- Groq API key (https://console.groq.com)
-- Pushover account (optional, https://pushover.net)
+- Optional: Vonage for SMS, Supabase for cloud orders (see `.env.template`)
 
 ### 2. Installation
 
@@ -56,11 +55,9 @@ Edit `.env` file with your credentials:
 
 ```env
 VAPI_API_KEY=your_vapi_api_key_here
-GROQ_API_KEY=your_groq_api_key_here
-PUSHOVER_USER_KEY=your_pushover_user_key_here
-PUSHOVER_API_TOKEN=your_pushover_api_token_here
 HOST=0.0.0.0
 PORT=8000
+# See .env.template for Vonage, Supabase, ADMIN_SECRET, etc.
 ```
 
 ### 4. Run the Server
@@ -79,10 +76,9 @@ The server will start on `http://localhost:8000`
 2. Create a new assistant with these settings:
 
 **Model Configuration:**
-- Provider: Groq
-- Model: llama-3.1-70b-versatile
-- Temperature: 0.7
-- Max Tokens: 500
+- Choose an LLM provider and model in Vapi that supports Swedish well (e.g. a fast hosted model in Vapi’s dashboard).
+- Temperature: ~0.7 (tune as needed)
+- Max Tokens: ~500
 
 **System Prompt:**
 Copy the contents from `system_prompt.md`
@@ -179,8 +175,8 @@ Access the dashboard at: `http://localhost:8000/dashboard`
 5. **Backend processes:**
    - Calculates total price
    - Saves to orders.json
-   - Prints kitchen ticket to console
-   - Sends Pushover notification
+   - Prints kitchen ticket to console / logs
+   - Optionally inserts to Supabase and sends SMS (Vonage) when configured
 6. **AI confirms** → "Tack för din beställning! Den är klar om 15 minuter."
 7. **Kitchen staff** → Views order on dashboard, marks as ready
 
@@ -243,7 +239,7 @@ Edit `system_prompt.md` to change the AI's behavior, tone, or conversation flow.
 The system logs important events to console:
 - Order placement
 - Kitchen tickets
-- Pushover notifications
+- SMS / Supabase status (when used)
 - API errors
 - Configuration warnings
 
@@ -258,11 +254,6 @@ The system logs important events to console:
 - Check `orders.json` permissions
 - Verify API endpoint is accessible
 - Check browser console for errors
-
-**Pushover not working:**
-- Verify API keys in `.env`
-- Check Pushover account status
-- Look for error messages in console
 
 **Vapi tool not working:**
 - Verify server URL is correct and accessible

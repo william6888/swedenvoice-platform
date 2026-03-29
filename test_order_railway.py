@@ -37,7 +37,7 @@ payload = {
 
 def main():
     print("📤 Skickar till RAILWAY:", URL)
-    print("   Om lyckat: Pushover, SMS, Supabase + Lovable")
+    print("   Om lyckat: SMS (om Vonage), Supabase + Lovable, köksbong i loggar")
     print()
     secret = (os.environ.get("WEBHOOK_SHARED_SECRET") or "").strip()
     headers = {}
@@ -50,7 +50,7 @@ def main():
         print(f"Svar: {r.text[:600]}")
         if r.status_code == 200:
             if '"results"' in r.text:
-                print("\n✅ Order processad! Kolla Pushover, Supabase, Lovable.")
+                print("\n✅ Order processad! Kolla Supabase, Lovable och serverloggar.")
             else:
                 print("\n⚠️  Svar OK men inga results – tool-calls parsades kanske inte.")
         else:

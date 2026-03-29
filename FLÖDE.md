@@ -17,7 +17,7 @@ Du säger: "Jag vill ha en Vesuvio"
         ↓
 Vapi → transkriberar röst till text
         ↓
-Groq LLM (AI) får texten → förstår beställning
+LLM i Vapi (konfigurerad i dashboarden) förstår beställningen
         ↓
 AI svarar: "Så en Vesuvio. Något att dricka? Stämmer det?"
         ↓
@@ -38,11 +38,11 @@ Din FastAPI-server (main.py) tar emot anropet på:
         ↓
 main.py: _process_place_order()
   → sparar i orders.json
-  → skriver köksbong i terminalen
-  → anropar send_pushover_notification()
-        ↓
-Pushover API (internet) → push till din mobil
+  → skriver köksbong i terminalen / Railway-loggar
+  → (valfritt) Supabase-insert, SMS till kund via Vonage
 ```
+
+Köket ser ordrar främst via **Lovable** (Supabase) och/eller **dashboard** (`/dashboard`), inte via push till mobil.
 
 ---
 
@@ -56,35 +56,29 @@ Alltså: AI:n anropar place_order **först när du har bekräftat**. Om du bara 
 
 ---
 
-## 4. Varför ingen Pushover-notis?
+## 4. Felsökning: ordern syns inte?
 
 | Steg | Vad kolla | Om det inte fungerar |
 |------|-----------|-----------------------|
-| A | Når request vår server? | Titta i **terminalen** – ser du `📥 place_order received` eller `📞 Vapi Webhook Event: tool-calls`? |
+| A | Når request vår server? | Titta i **terminalen / Railway Logs** – ser du `place_order` eller `Vapi Webhook Event: tool-calls`? |
 | B | Annars | Fel URL i Vapi (Tool URL / Messaging Server URL) – använd Railway-URL. |
-| C | Sparas ordern? | Kolla `orders.json` – läggs nya ordrar till? |
-| D | Pushover konfigurerad? | Kör: `curl http://localhost:8000/test_pushover` – får du notis? |
-| E | Ser du "Pushover notification sent" i terminal? | Då når anropet Pushover. Annars: kolla .env (PUSHOVER_USER_KEY, PUSHOVER_API_TOKEN). |
+| C | Sparas ordern? | Kolla `orders.json` lokalt eller Supabase `orders` i molnet. |
+| D | Supabase? | `GET /debug-supabase` – alla fält SET och `client_initialized` true? |
+| E | Köksbong i loggar? | Efter lyckad order ska en tydlig bong skrivas i loggen. |
 
 ---
 
 ## 5. Snabbtest
 
-1. **Testa Pushover direkt:**
-   ```bash
-   curl http://localhost:8000/test_pushover
-   ```
-   Får du notis på mobilen? I så fall är Pushover OK.
-
-2. **Testa place_order direkt (simulera Vapi):**
+1. **Testa place_order direkt (simulera Vapi):**
    ```bash
    curl -X POST http://localhost:8000/place_order \
      -H "Content-Type: application/json" \
      -d '{"items":[{"id":2,"name":"Vesuvio","quantity":1}],"special_requests":null}'
    ```
-   Ser du köksbong i terminalen + Pushover-notis? Då fungerar backend + Pushover.
+   Ser du köksbong i terminalen och ny rad i `orders.json`? Då fungerar backend-kärnan.
 
-3. **Ring och säg exakt:**
+2. **Ring och säg exakt:**
    - "Hej, jag vill ha en Vesuvio"
    - AI: "Så en Vesuvio. Stämmer det?"
    - Du: "Ja"

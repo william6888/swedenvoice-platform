@@ -22,7 +22,7 @@ Ersätt **aldrig** med `https://api.example.com/function` – det är bara exemp
 |-------|-----------|
 | Fel path / 404 | **Relevant.** Använd full URL inkl. `/place_order`. |
 | Fel JSON till Vapi | **Relevant.** Er `main.py` returnerar `{"results":[...]}` med `name`, `toolCallId`, `result` för Vapi-format – bra. |
-| Timeout 20 s | **Relevant.** Supabase + Pushover + bakgrund-SMS ska normalt vara under 20 s; vid problem: höj timeout i Vapi eller optimera. |
+| Timeout 20 s | **Relevant.** Supabase + bakgrund-SMS ska normalt vara under 20 s; vid problem: höj timeout i Vapi eller optimera. |
 | Railway kallstart | **Relevant.** Första anrop efter viloläge kan vara långsamt; överväg alltid-på / health-ping eller Railway-plan som inte sover. |
 | Auth headers | **Relevant om ni lägger till auth.** Idag: "No authentication" i Vapi matchar backend (ingen obligatorisk header för `place_order`). |
 | Assistant-level `server.url` | **Medelrisk.** Om allt går till en URL måste den svara **200** snabbt på många eventtyper. Er `/vapi/webhook` hanterar bl.a. `end-of-call-report` och okända events med 200 – **okej** om ni sätter webhook dit. |

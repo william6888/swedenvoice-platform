@@ -64,7 +64,7 @@ def test_env_template():
     with open(".env.template", "r", encoding="utf-8") as f:
         content = f.read()
     
-    required_keys = ["VAPI_API_KEY", "GROQ_API_KEY", "PUSHOVER_USER_KEY", "PUSHOVER_API_TOKEN"]
+    required_keys = ["VAPI_API_KEY", "VONAGE_API_KEY", "SUPABASE_URL", "SUPABASE_KEY"]
     for key in required_keys:
         assert key in content, f"Missing key in .env.template: {key}"
     

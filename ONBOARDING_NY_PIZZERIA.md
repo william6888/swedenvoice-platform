@@ -1,6 +1,6 @@
 # Onboarding: Ny pizzeria – alla verktyg, steg för steg
 
-Denna fil beskriver **allt** du behöver för att antingen **sätt upp systemet från noll** eller **lägga till en ny pizzeria** i befintlig kedja. Alla verktyg (Vonage, Vapi, Lovable, Supabase, Cursor, GitHub, Railway, Pushover m.fl.) finns med – enkelt, tydligt och korrekt.
+Denna fil beskriver **allt** du behöver för att antingen **sätt upp systemet från noll** eller **lägga till en ny pizzeria** i befintlig kedja. Alla verktyg (Vonage, Vapi, Lovable, Supabase, Cursor, GitHub, Railway m.fl.) finns med – enkelt, tydligt och korrekt.
 
 ---
 
@@ -14,9 +14,8 @@ Denna fil beskriver **allt** du behöver för att antingen **sätt upp systemet 
 | **Supabase** | supabase.com → ditt projekt | Databas: tabellerna `restaurants`, `orders`. Ny pizzeria = ny rad i `restaurants`. KDS/Lovable läser härifrån. |
 | **Vapi** | vapi.ai/dashboard | Röst-AI. **Ordning i Vapi:** 1) Skapa Assistant, 2) Konfigurera Tools (t.ex. `place_order`), 3) Phone Numbers (Server URL med `?rest_id=...`, koppla Assistant). Ny pizzeria = ny Assistant eller nytt nummer med egen Server URL. |
 | **Vonage** | dashboard.nexmo.com | SMS till kund (bekräftelse). Idag global i Railway (.env). Senare kan per-restaurang i `restaurant_secrets`. |
-| **Pushover** | pushover.net | Push-notis till köket. Idag global i Railway (.env). Senare kan per-restaurang. |
 | **Lovable** | lovable.app | Köksdashboard (KDS) som visar ordrar. Läser från Supabase. Ny pizzeria = filtrera på `restaurant_id` / `restaurant_uuid` eller separat vy. |
-| **Groq** | console.groq.com | LLM för Vapi (svenska). API-nyckel sätts i Vapi (eller .env). En nyckel för alla. |
+| **LLM i Vapi** | vapi.ai/dashboard | Välj modell och provider i Assistant (t.ex. en modell som klarar svenska bra). Konfigureras i Vapi, inte i denna backends `.env`. |
 | **ElevenLabs** (eller Cartesia) | elevenlabs.io | Röst till Vapi. Kopplas i Vapi Assistant. En röst kan användas för alla pizzerior. |
 
 **Nyckeln som inget blandas ihop:** Varje restaurang har ett **unikt `rest_id`** (t.ex. `Gislegrillen_01`, `PizzeriaSöder_01`). Det används i Supabase (`external_id`), i menyfilen (`menu_<rest_id>.json`), i Vapi webhook-URL (`?rest_id=...`) och i Lovable (filtrera ordrar på `restaurant_id`).
@@ -25,8 +24,8 @@ Denna fil beskriver **allt** du behöver för att antingen **sätt upp systemet 
 
 ## Var man börjar
 
-- **Första gången (sätt upp hela kedjan):** Börja med steg 1 nedan (GitHub + Cursor), sedan Railway → Supabase → Vonage → Pushover → Vapi → Lovable. En gång klart behöver du bara “Lägg till ny pizzeria” nästa gång.
-- **Lägg till pizzeria #2, #3 …:** Börja med “Lägg till ny pizzeria” nedan. Du behöver **inte** skapa nytt Railway-/Supabase-/Vonage-/Pushover-/Lovable-konto – bara ny rad i Supabase, valfri menyfil i repot, och Vapi (ny Assistant eller ny Server URL med `rest_id`).
+- **Första gången (sätt upp hela kedjan):** Börja med steg 1 nedan (GitHub + Cursor), sedan Railway → Supabase → Vonage (valfritt) → Vapi → Lovable. En gång klart behöver du bara “Lägg till ny pizzeria” nästa gång.
+- **Lägg till pizzeria #2, #3 …:** Börja med “Lägg till ny pizzeria” nedan. Du behöver **inte** skapa nytt Railway-/Supabase-/Vonage-/Lovable-konto – bara ny rad i Supabase, valfri menyfil i repot, och Vapi (ny Assistant eller ny Server URL med `rest_id`).
 
 ---
 
@@ -48,7 +47,7 @@ Följ stegen i ordning. När A är klar har du **en** pizzeria live (t.ex. Gisle
 
 - [ ] **Railway:** Logga in på [railway.app](https://railway.app) → New Project → **Deploy from GitHub repo** → välj Gislegrillen-repot.
 - [ ] **Networking:** Settings → Networking → **Generate Domain**. Notera URL:en (t.ex. `https://gislegrillen-production-xxxx.up.railway.app`). Detta är din **backend-URL** – samma för alla pizzerior.
-- [ ] **Variabler:** Projekt → Variables. Lägg till alla från `.env.template` (se listan under A2 i slutet av denna fil). Minst: `VAPI_API_KEY`, `GROQ_API_KEY`, `PUSHOVER_USER_KEY`, `PUSHOVER_API_TOKEN`, `SUPABASE_URL`, `SUPABASE_KEY`, `ADMIN_SECRET`. Om du ska skicka SMS: `VONAGE_API_KEY`, `VONAGE_API_SECRET`, `VONAGE_FROM_NUMBER`.
+- [ ] **Variabler:** Projekt → Variables. Lägg till alla från `.env.template` (se tabellen A8). Minst: `VAPI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `ADMIN_SECRET`. Om du ska skicka SMS: `VONAGE_API_KEY`, `VONAGE_API_SECRET`, `VONAGE_FROM_NUMBER`.
 - [ ] Efter deploy: öppna `https://<din-railway-url>/health` – ska returnera OK.
 
 ---
@@ -70,10 +69,9 @@ Följ stegen i ordning. När A är klar har du **en** pizzeria live (t.ex. Gisle
 
 ---
 
-### A5. Pushover (push till köket, valfritt)
+### A5. Kök och ordrar (ingen separat push-app)
 
-- [ ] **Pushover:** Logga in på [pushover.net](https://pushover.net). Skapa app, hämta **User Key** och **API Token**.
-- [ ] Sätt i Railway: `PUSHOVER_USER_KEY`, `PUSHOVER_API_TOKEN`. För circuit-breaker-alert: valfritt `PUSHOVER_ALERTS_USER_KEY`, `PUSHOVER_ALERTS_TOKEN`.
+- [ ] Köket ser ordrar via **Lovable** (Supabase) och/eller inbyggd **dashboard** (`/dashboard`). Servern skriver även **köksbong** i Railway-loggar. Circuit breaker och SMS-fel loggas som `[ALERT]` i samma loggar.
 
 ---
 
@@ -81,11 +79,11 @@ Följ stegen i ordning. När A är klar har du **en** pizzeria live (t.ex. Gisle
 
 **Ordning i Vapi (som i dashboarden): först Assistant → sedan Tools → sedan Phone Numbers.** Gör stegen i den ordningen.
 
-- [ ] **Vapi:** Logga in på [vapi.ai/dashboard](https://vapi.ai/dashboard). Under **API Keys** (eller Integrations): koppla **Groq** (API-nyckel från [console.groq.com](https://console.groq.com)) och **ElevenLabs** (eller Cartesia) för röst.
+- [ ] **Vapi:** Logga in på [vapi.ai/dashboard](https://vapi.ai/dashboard). Under **API Keys** / **Integrations**: koppla den **LLM-provider** och **röst** (t.ex. ElevenLabs eller Cartesia) du valt för Assistanten.
 
 **Steg 1 – Assistant (BUILD → Assistants)**  
 - [ ] Klicka **Create Assistant** (eller skapa ny). Namn t.ex. "Gislegrillen Order Bot" (eller "Riley" / restaurangens namn).
-- [ ] **Model:** Provider Groq, välj modell (t.ex. llama-3.1-70b-versatile). First Message Mode: "Assistant speaks first". **First Message:** t.ex. "Välkommen till Gislegrillen, vad vill du beställa?"
+- [ ] **Model:** Välj provider och modell i Vapi som passar svenska (enligt Vapis aktuella utbud). First Message Mode: "Assistant speaks first". **First Message:** t.ex. "Välkommen till Gislegrillen, vad vill du beställa?"
 - [ ] **System prompt:** Kopiera **hela** innehållet från `system_prompt.md` (i repot) till Assistant-fältet. (Personlighet, språk, arbetsflöde, när `place_order` ska anropas.)
 - [ ] **Voice (fliken Voice):** Välj ElevenLabs, röst Jonas (svenska) eller Cartesia med svensk röst. Språk: Swedish (sv-SE). Spara Assistant.
 
@@ -102,7 +100,7 @@ Följ stegen i ordning. När A är klar har du **en** pizzeria live (t.ex. Gisle
 - [ ] **Inbound Settings:** **Tilldela denna telefonnummer till din Assistant** (Riley / Gislegrillen Order Bot) så att inkommande samtal hanteras av just den assistenten (med rätt `rest_id` i URL:en).
 - [ ] Spara. Då är kedjan klar: samtal → nummer → Assistant → tool `place_order` → din backend.
 
-- [ ] **Testa:** Ring numret, lägg en testbeställning. Kontrollera att ordern sparas i Supabase och att Pushover/SMS fungerar om konfigurerat.
+- [ ] **Testa:** Ring numret, lägg en testbeställning. Kontrollera att ordern sparas i Supabase och att SMS fungerar om Vonage är konfigurerat.
 
 ---
 
@@ -120,18 +118,15 @@ Följ stegen i ordning. När A är klar har du **en** pizzeria live (t.ex. Gisle
 | Variabel | Obligatorisk | Kommentar |
 |----------|---------------|-----------|
 | VAPI_API_KEY | Ja | Från vapi.ai |
-| GROQ_API_KEY | Ja | Från console.groq.com |
 | SUPABASE_URL | Ja | Supabase Project URL |
 | SUPABASE_KEY | Ja | Supabase anon (eller service) key |
 | ADMIN_SECRET | Ja | Egen hemlig sträng för /admin/* |
-| PUSHOVER_USER_KEY | Rekommenderat | Push till köket |
-| PUSHOVER_API_TOKEN | Rekommenderat | |
 | VONAGE_API_KEY | Valfritt | SMS till kund |
 | VONAGE_API_SECRET | Valfritt | |
 | VONAGE_FROM_NUMBER | Valfritt | +46... |
 | RESTAURANT_UUID | Valfritt | Fallback om Supabase saknas; annars från `restaurants.id` |
 | ENCRYPTION_SECRET | Valfritt | För Fas 2 tenant-nycklar (restaurant_secrets) |
-| PUSHOVER_ALERTS_* | Valfritt | Annan Pushover för circuit-breaker-alert |
+| WEBHOOK_SHARED_SECRET | Valfritt | Auth på POST /place_order och /vapi/webhook |
 
 ---
 
@@ -178,10 +173,10 @@ När kedjan redan kör (Del A klar) behöver du **inga nya konton**. Du gör bar
 
 ---
 
-### B5. Vonage & Pushover (idag)
+### B5. Vonage (idag)
 
-- [ ] **Idag:** Samma Vonage/Pushover för alla (Railway Variables). Ingen ändring behövs.
-- [ ] **Senare:** Om du vill ha egna SMS/Pushover per restaurang använder du tabellen **`restaurant_secrets`** (Fas 2) med krypterad config per `restaurant_uuid`. Då behöver du sätta nycklar där och eventuellt uppdatera backend att läsa tenant_secrets.
+- [ ] **Idag:** Samma Vonage för alla (Railway Variables) om SMS används. Ingen ändring behövs för ny pizzeria om ni delar samma avsändarnummer.
+- [ ] **Senare:** Om du vill ha egna SMS per restaurang använder du tabellen **`restaurant_secrets`** (Fas 2) med krypterad config per `restaurant_uuid`.
 
 ---
 
@@ -200,7 +195,7 @@ När kedjan redan kör (Del A klar) behöver du **inga nya konton**. Du gör bar
 - [ ] Lägg en testbeställning. Kontrollera:
   - [ ] **Supabase** → `orders`: ny rad med **`restaurant_id`** = `<rest_id>` och **`restaurant_uuid`** = den nya restaurangens UUID.
   - [ ] **Lovable:** Logga in / välj den restaurangen – ordern ska synas i köksvyn.
-  - [ ] Pushover/SMS om konfigurerat.
+  - [ ] SMS om Vonage är konfigurerat.
 - [ ] Om du skapade `menu_<rest_id>.json`: verifiera att rätt rätter och priser används.
 
 ---
@@ -221,8 +216,8 @@ När kedjan redan kör (Del A klar) behöver du **inga nya konton**. Du gör bar
 
 ## Sammanfattning – alla verktyg i ordning
 
-**Första gången:** GitHub → Cursor → Railway (deploy + variabler) → Supabase (tabeller + första restaurang + API-nycklar) → Vonage → Pushover → Vapi (Assistant, webhook med `rest_id`, nummer) → Lovable (koppla Supabase, visa ordrar).
+**Första gången:** GitHub → Cursor → Railway (deploy + variabler) → Supabase (tabeller + första restaurang + API-nycklar) → Vonage (valfritt) → Vapi (Assistant, webhook med `rest_id`, nummer) → Lovable (koppla Supabase, visa ordrar).
 
-**Ny pizzeria:** Välj `rest_id` → Supabase (ny rad i `restaurants`) → Cursor/GitHub (valfri `menu_<rest_id>.json`, push) → Railway (ingen ändring) → Vapi (ny Assistant eller ny Server URL med `?rest_id=...`, koppla nummer) → Vonage/Pushover (ingen ändring idag) → Lovable (filtrera på ny `restaurant_id`/`restaurant_uuid`) → Testa.
+**Ny pizzeria:** Välj `rest_id` → Supabase (ny rad i `restaurants`) → Cursor/GitHub (valfri `menu_<rest_id>.json`, push) → Railway (ingen ändring) → Vapi (ny Assistant eller ny Server URL med `?rest_id=...`, koppla nummer) → Vonage (ingen ändring om delad) → Lovable (filtrera på ny `restaurant_id`/`restaurant_uuid`) → Testa.
 
 Inget blandas ihop om **ett unikt `rest_id`** används överallt: Supabase, menyfil, Vapi-URL och Lovable-filter.

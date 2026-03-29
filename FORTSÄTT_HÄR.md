@@ -4,33 +4,25 @@
 
 ---
 
-## Vad vi fixat (denna session)
+## Vad vi fixat (tidigare sessioner)
 
 1. **Vapi toolCalls** – Vapi skickar `toolCalls` (inte bara toolCallList). Stöd lagt till.
 2. **Dubbla notiser** – Deduplicering av tool-anrop (samma anrop i toolCalls + toolCallList).
 3. **Order-id** – Slump-suffix så att inte två ordrar får samma id.
-4. **Pushover retry** – Ett extra försök vid misslyckat anrop.
 
 ---
 
-## Kvarvarande problem
+## Driftnotering
 
-**Pushover-notiser fungerar inte alltid** – Ibland får användaren notis, ibland inte.
-
-Möjliga orsaker att undersöka:
-- Både Tool URL (`/place_order`) OCH webhook (`/vapi/webhook`) konfigurerade i Vapi → kan ge dubbel/bristande hantering.
-- Ska endast **en** URL användas: Messaging Server URL = `https://DIN-RAILWAY-URL/vapi/webhook`.
-- Pushover-app beteende vid många notiser.
-- I terminalen: sök efter `⚠️ Pushover FAILED` eller `❌ Pushover-fel`.
+**Köksnotiser:** Backend skickar inte längre push till mobil. Ordrar syns via **Supabase/Lovable**, **dashboard** (`/dashboard`) och **köksbong i Railway-loggar**. Vid SMS-fel eller circuit breaker loggas `[ALERT]` i loggarna.
 
 ---
 
 ## Snabbstart (för ny chatt)
 
 ```
-Läs PROJECT_CONTEXT.md och FORTSÄTT_HÄR.md. Gislegrillen röstbeställningssystem. 
-Pushover-notiser kommer inte alltid fram. Vi har lagt till toolCalls-stöd, deduplicering, retry. 
-Hjälp mig felsöka varför notiser uteblir.
+Läs PROJECT_CONTEXT.md och FORTSÄTT_HÄR.md. Gislegrillen röstbeställningssystem.
+Backend: FastAPI, Vapi webhook, Supabase, valfritt Vonage SMS.
 ```
 
 ---
