@@ -9,8 +9,7 @@ import json
 import os
 import re
 import time
-import unicodedata
-from difflib import SequenceMatcher
+import menu_match
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
@@ -243,83 +242,10 @@ def load_menu(rest_id: Optional[str] = None) -> dict:
 # Fas 2 Diamond Polish: meny-cache TTL 3 min (per rest_id för framtida multi-tenant)
 _MENU_CACHE: Dict[str, dict] = {}  # key -> {"data": menu_dict, "expires_at": float}
 _MENU_CACHE_TTL_SEC = 180
-# normalized_item_name -> menypost (samma TTL som meny-cache; rensas vid invalidate)
-_MENU_NORM_LOOKUP: Dict[str, Dict[str, dict]] = {}
 
 
 def _menu_cache_key(rest_id: Optional[str]) -> str:
     return ("menu:%s" % rest_id) if rest_id else "menu"
-
-
-def _normalize_for_menu_match(s: str) -> str:
-    """Normalisera namn för tolerant matchning (Vapi/LLM avviker ofta från menytexter).
-    lowercase, bindestreck -> mellanslag, ta bort diakritiska kombinationstecken,
-    strip av vald punctuation, kollapsa whitespace. Behåller åäö (är inte Mn).
-    """
-    if not s or not isinstance(s, str):
-        return ""
-    t = unicodedata.normalize("NFD", s.strip().lower())
-    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
-    for old, new in (("-", " "), ("–", " "), ("—", " ")):
-        t = t.replace(old, new)
-    for ch in ("(", ")", ",", ".", "'", "\u2019", "\u2018", '"', "`", "´", ";", ":", "!"):
-        t = t.replace(ch, "")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-
-def _build_normalized_menu_lookup(menu: dict) -> Tuple[Dict[str, dict], List[str]]:
-    """Bygg normalized_name -> menu_item.
-    Inkluderar även item['aliases'] (om lista) som extra nycklar.
-    Vid kollision mellan olika items: nyckeln läggs i collisions och tas bort ur lookup (fail-safe)."""
-    lookup: Dict[str, dict] = {}
-    collisions: List[str] = []
-
-    def _add_key(k: str, item: dict) -> None:
-        if not k:
-            return
-        if k in lookup and lookup[k].get("id") != item.get("id"):
-            collisions.append(k)
-            # fail-safe: disable this key entirely to avoid wrong mapping
-            lookup.pop(k, None)
-            return
-        if k not in lookup:
-            lookup[k] = item
-
-    for items in menu.values():
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            raw = item.get("name") or ""
-            _add_key(_normalize_for_menu_match(raw), item)
-            aliases = item.get("aliases")
-            if isinstance(aliases, list):
-                for a in aliases:
-                    if isinstance(a, str) and a.strip():
-                        _add_key(_normalize_for_menu_match(a), item)
-    return lookup, collisions
-
-
-def _get_normalized_menu_lookup(rest_id: Optional[str]) -> Dict[str, dict]:
-    key = _menu_cache_key(rest_id)
-    now = time.time()
-    ent = _MENU_CACHE.get(key)
-    if key in _MENU_NORM_LOOKUP and ent and now < ent["expires_at"]:
-        return _MENU_NORM_LOOKUP[key]
-    # Bygg från aktuell cache (get_menu_cached uppdaterar _MENU_CACHE)
-    get_menu_cached(rest_id)
-    ent = _MENU_CACHE[key]
-    lookup, collisions = _build_normalized_menu_lookup(ent["data"])
-    if collisions:
-        uniq = list(dict.fromkeys(collisions))[:10]
-        print(
-            "❌ Meny/alias-kollision: flera rätter delar samma normaliserade nyckel. "
-            "Nycklarna är DISABLED för säkerhets skull: %s" % ", ".join(uniq)
-        )
-    _MENU_NORM_LOOKUP[key] = lookup
-    return lookup
 
 
 def get_menu_cached(rest_id: Optional[str] = None) -> dict:
@@ -334,14 +260,14 @@ def get_menu_cached(rest_id: Optional[str] = None) -> dict:
 
 
 def _invalidate_menu_cache(rest_id: Optional[str] = None) -> None:
-    """Rensa meny-cache så nästa anrop laddar från fil. rest_id=None rensar global 'menu', annars 'menu:{rest_id}'."""
+    """Rensa meny-cache så nästa anrop laddar från fil/rest_id. Även menu_match-index."""
     if rest_id:
-        k = _menu_cache_key(rest_id)
+        k = _menu_cache_key(rest_id.strip())
         _MENU_CACHE.pop(k, None)
-        _MENU_NORM_LOOKUP.pop(k, None)
+        menu_match.invalidate_menu_index_cache(rest_id.strip())
     else:
         _MENU_CACHE.clear()
-        _MENU_NORM_LOOKUP.clear()
+        menu_match.invalidate_menu_index_cache(None)
 
 
 def load_orders():
@@ -367,88 +293,46 @@ def find_menu_item(item_id: int, rest_id: Optional[str] = None):
     return None
 
 
-def _fuzzy_menu_item_match(rest_id: Optional[str], nk: str, raw_hint: str) -> Optional[dict]:
-    """Sista utvägen: jämför STT/LLM-namn mot alla rätters normaliserade namn (difflib).
-    Konservativa trösklar + krav på lucka till näst bästa för att minska fel match."""
-    if len(nk) < 4:
-        return None
+def _resolve_items_with_menu_match(
+    items_data: list,
+    rest_id: str,
+) -> Tuple[bool, Optional[list], str]:
+    """
+    Meny-match v2.1: returnerar (True, resolved_rows, "") eller (False, None, json_result_str).
+    json_result_str är redan serialiserad fel-payload (success:false + unmatchedItems).
+    """
     menu = get_menu_cached(rest_id)
-    scored: List[Tuple[float, dict]] = []
-    for items in menu.values():
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            cand = _normalize_for_menu_match(item.get("name") or "")
-            if not cand:
-                continue
-            r = SequenceMatcher(None, nk, cand).ratio()
-            scored.append((r, item))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: -x[0])
-    best_r, best_it = scored[0]
-    second_r = scored[1][0] if len(scored) > 1 else 0.0
-    min_r = 0.93 if len(nk) <= 4 else (0.88 if len(nk) <= 7 else 0.845)
-    if best_r < min_r:
-        return None
-    if second_r >= best_r - 0.035:
-        return None
-    print(
-        "🔎 Fuzzy meny-match: %r -> %s (id=%s) ratio=%.3f runner-up=%.3f"
-        % (raw_hint[:80], best_it.get("name"), best_it.get("id"), best_r, second_r)
-    )
-    return best_it
+    if not menu_match.menu_has_items(menu):
+        return (
+            False,
+            None,
+            menu_match.place_order_fail_json(
+                "Menyn kunde inte laddas för restaurangen",
+                [],
+            ),
+        )
+    index = menu_match.get_or_build_menu_index(rest_id, menu)
+    if index is None:
+        return (
+            False,
+            None,
+            menu_match.place_order_fail_json(
+                "Menyn kunde inte laddas för restaurangen",
+                [],
+            ),
+        )
+    ok, resolved, unmatched = menu_match.resolve_order_items(items_data, index, rest_id)
+    if not ok:
+        return (
+            False,
+            None,
+            menu_match.place_order_fail_json(
+                "En eller flera rätter kunde inte matchas",
+                unmatched,
+            ),
+        )
+    return (True, resolved, "")
 
-
-def find_menu_item_by_name(rest_id: Optional[str], name: str):
-    """Hitta menyrad: normalisera → exakt lookup (inkl. alias), sedan fuzzy mot rättnamn om inget träff."""
-    if not name or not isinstance(name, str):
-        return None
-    nk = _normalize_for_menu_match(name)
-    if not nk:
-        return None
-    lookup = _get_normalized_menu_lookup(rest_id)
-    hit = lookup.get(nk)
-    if hit:
-        return hit
-    return _fuzzy_menu_item_match(rest_id, nk, name)
-
-
-def _resolve_items_to_ids(items_data: list, rest_id: Optional[str] = None) -> list:
-    """Sätt id från menyn via namn om id saknas, eller om angivet id inte finns i menyn (fel från LLM)."""
-    for d in items_data:
-        if not isinstance(d, dict):
-            continue
-        raw_id = d.get("id")
-        need_by_name = False
-        if raw_id is None:
-            need_by_name = True
-        else:
-            try:
-                if find_menu_item(int(raw_id), rest_id) is None:
-                    need_by_name = True
-            except (TypeError, ValueError):
-                need_by_name = True
-        if not need_by_name:
-            continue
-        name = (d.get("name") or "").strip()
-        if not name:
-            continue
-        mi = find_menu_item_by_name(rest_id, name)
-        if mi:
-            d["id"] = mi["id"]
-            d["name"] = mi["name"]
-    return items_data
-
-
-def _items_all_have_id(items_data: list) -> tuple:
-    """Return (True, None) if all items have id; else (False, error_message)."""
-    missing = [d.get("name") or "?" for d in items_data if isinstance(d, dict) and d.get("id") is None]
-    if not missing:
-        return (True, None)
-    return (False, "Kunde inte matcha rätt: " + ", ".join(missing[:5]))
 
 def calculate_total_price(items: List[OrderItem], rest_id: Optional[str] = None) -> float:
     """Calculate total price from order items. rest_id = vilken pizzeria (rätt meny, rätt priser)."""
@@ -1351,20 +1235,22 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
-                            "result": json.dumps({"success": False, "error": "No items in order"})
+                            "result": menu_match.place_order_fail_json(
+                                "Inga artiklar i beställningen",
+                                [],
+                            ),
                         })
                         continue
-                    items_data = _resolve_items_to_ids(items_data, rest_id)
-                    ok, err = _items_all_have_id(items_data)
-                    if not ok:
+                    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
+                    if not rk:
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
-                            "result": json.dumps({"success": False, "error": err})
+                            "result": fail_json,
                         })
                         continue
                     try:
-                        items = [OrderItem(**it) for it in items_data]
+                        items = [OrderItem(**it) for it in resolved_items]
                         order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         raw_transcript = _get_raw_transcript_from_webhook(body)
@@ -1382,12 +1268,16 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         if customer_phone:
                             schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
                     except Exception as e:
+                        print(f"❌ place_order exception: {e}")
                         if _circuit_breaker_record_failure(rest_id):
                             _send_circuit_breaker_alert(rest_id)
                         results.append({
                             "name": "place_order",
                             "toolCallId": tool_call_id,
-                            "result": json.dumps({"success": False, "error": str(e)})
+                            "result": menu_match.place_order_fail_json(
+                                "Beställningen kunde inte genomföras. Försök igen.",
+                                [],
+                            ),
                         })
                 if results:
                     print(f"✅ Vapi tool-call processed, {len(results)} result(s)")
@@ -1396,10 +1286,15 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                 raise HTTPException(status_code=400, detail="No place_order tool call found")
         
         # Direct format: {"items": [...], "special_requests": "..."}
-        # OBS: Går inte genom Fas 1–3 (ingen rest_id, circuit breaker, token bucket eller tenant-check).
-        # Använd för intern/direct API; för multi-tenant använd Vapi-format eller /vapi/webhook.
+        # Samma meny-matchning som Vapi. Optional ?rest_id= (default Gislegrillen_01).
+        rest_direct = (request.query_params.get("rest_id") or "").strip() or "Gislegrillen_01"
         req = PlaceOrderRequest(**body)
-        order = _process_place_order(req.items, req.special_requests)
+        items_as_dicts = [it.model_dump() for it in req.items]
+        rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_as_dicts, rest_direct)
+        if not rk:
+            return JSONResponse(content=json.loads(fail_json))
+        items_direct = [OrderItem(**it) for it in resolved_items]
+        order = _process_place_order(items_direct, req.special_requests, rest_id=rest_direct)
         return JSONResponse(content={
             "success": True,
             "message": "Order placed successfully",
@@ -1601,20 +1496,22 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
-                        "result": json.dumps({"success": False, "error": "No items"})
+                        "result": menu_match.place_order_fail_json(
+                            "Inga artiklar i beställningen",
+                            [],
+                        ),
                     })
                     continue
-                items_data = _resolve_items_to_ids(items_data, rest_id)
-                ok, err = _items_all_have_id(items_data)
-                if not ok:
+                rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
+                if not rk:
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
-                        "result": json.dumps({"success": False, "error": err})
+                        "result": fail_json,
                     })
                     continue
                 try:
-                    items = [OrderItem(**it) for it in items_data]
+                    items = [OrderItem(**it) for it in resolved_items]
                     order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     raw_transcript = _get_raw_transcript_from_webhook(body)
@@ -1623,7 +1520,11 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
-                        "result": json.dumps({"success": True, "order_id": order.order_id})
+                        "result": json.dumps({
+                            "success": True,
+                            "order_id": order.order_id,
+                            "total_price": float(order.total_price),
+                        }, ensure_ascii=False),
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
                     if customer_phone:
@@ -1637,7 +1538,10 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     results.append({
                         "name": "place_order",
                         "toolCallId": tool_call_id,
-                        "result": json.dumps({"success": False, "error": str(e)})
+                        "result": menu_match.place_order_fail_json(
+                            "Beställningen kunde inte genomföras. Försök igen.",
+                            [],
+                        ),
                     })
             if results:
                 return JSONResponse(content={"results": results})
