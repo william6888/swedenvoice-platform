@@ -35,14 +35,23 @@ def test_menu_structure():
     print("  ✅ All items have required fields\n")
 
 def test_orders_file():
-    """Test orders.json"""
-    print("🔍 Testing orders.json...")
-    
-    with open("orders.json", "r", encoding="utf-8") as f:
-        orders = json.load(f)
-    
-    assert isinstance(orders, list), "orders.json should be a list"
-    print(f"  ✅ orders.json is valid (contains {len(orders)} orders)\n")
+    """Test orders storage: committed template + optional local orders.json"""
+    print("🔍 Testing orders storage...")
+    example = Path("orders.example.json")
+    assert example.exists(), "orders.example.json should exist in repo"
+    with open(example, "r", encoding="utf-8") as f:
+        template = json.load(f)
+    assert isinstance(template, list), "orders.example.json should be a JSON list"
+    print(f"  ✅ orders.example.json is valid (template, {len(template)} sample orders)")
+
+    local = Path("orders.json")
+    if local.exists():
+        with open(local, "r", encoding="utf-8") as f:
+            orders = json.load(f)
+        assert isinstance(orders, list), "orders.json should be a list"
+        print(f"  ✅ orders.json is valid locally ({len(orders)} orders)\n")
+    else:
+        print("  ✅ orders.json absent (ok — created at server startup; not in git)\n")
 
 def test_system_prompt():
     """Test system_prompt.md exists and has content"""

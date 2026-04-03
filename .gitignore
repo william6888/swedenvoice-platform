@@ -1,6 +1,9 @@
 # Environment variables
 .env
 
+# Lokala beställningar (skapas vid körning; committas inte – se orders.example.json)
+orders.json
+
 # Railway
 .railway
 railway.json
