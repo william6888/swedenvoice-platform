@@ -1,0 +1,28 @@
+name: Python checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile all Python (catches Syntax/Indentation errors)
+        run: python -m compileall -q .
+
+      - name: Run repository smoke tests (no external services)
+        run: python test_system.py
