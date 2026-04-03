@@ -24,7 +24,7 @@
     {"id": 22, "name": "Quattro Stagioni", "price": 140, "description": "Skinka, champinjoner, räkor, musslor, oliver"},
     {"id": 23, "name": "John Blund", "price": 140, "description": "Skinka, champinjoner, bacon, ägg, lök"},
     {"id": 24, "name": "Lamare", "price": 140, "description": "Skinka, champinjoner, ananas, räkor"},
-    {"id": 25, "name": "Ciao-Ciao", "price": 140, "description": "Champinjoner, lök, vitlök, fläskfilé (inbakad)"},
+    {"id": 25, "name": "Ciao-Ciao", "aliases": ["ciao", "ciao ciao"], "price": 140, "description": "Champinjoner, lök, vitlök, fläskfilé (inbakad)"},
     {"id": 26, "name": "Disco", "price": 140, "description": "Skinka, köttfärs, räkor"},
     {"id": 27, "name": "Vegetarisk", "price": 140, "description": "Lök, ananas, paprika, sparris, champinjoner, oliver"},
     {"id": 28, "name": "Biblos", "price": 140, "description": "Sparris, fläskfilé, bearnaisesås"},
