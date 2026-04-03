@@ -10,6 +10,7 @@ import os
 import re
 import time
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
@@ -366,16 +367,53 @@ def find_menu_item(item_id: int, rest_id: Optional[str] = None):
     return None
 
 
+def _fuzzy_menu_item_match(rest_id: Optional[str], nk: str, raw_hint: str) -> Optional[dict]:
+    """Sista utvägen: jämför STT/LLM-namn mot alla rätters normaliserade namn (difflib).
+    Konservativa trösklar + krav på lucka till näst bästa för att minska fel match."""
+    if len(nk) < 4:
+        return None
+    menu = get_menu_cached(rest_id)
+    scored: List[Tuple[float, dict]] = []
+    for items in menu.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cand = _normalize_for_menu_match(item.get("name") or "")
+            if not cand:
+                continue
+            r = SequenceMatcher(None, nk, cand).ratio()
+            scored.append((r, item))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best_r, best_it = scored[0]
+    second_r = scored[1][0] if len(scored) > 1 else 0.0
+    min_r = 0.93 if len(nk) <= 4 else (0.88 if len(nk) <= 7 else 0.845)
+    if best_r < min_r:
+        return None
+    if second_r >= best_r - 0.035:
+        return None
+    print(
+        "🔎 Fuzzy meny-match: %r -> %s (id=%s) ratio=%.3f runner-up=%.3f"
+        % (raw_hint[:80], best_it.get("name"), best_it.get("id"), best_r, second_r)
+    )
+    return best_it
+
+
 def find_menu_item_by_name(rest_id: Optional[str], name: str):
-    """Hitta menyrad via namn med deterministisk matchning:
-    normalisera -> exakt lookup (inkl alias). Ingen fuzzy fallback (för att undvika felmatch)."""
+    """Hitta menyrad: normalisera → exakt lookup (inkl. alias), sedan fuzzy mot rättnamn om inget träff."""
     if not name or not isinstance(name, str):
         return None
     nk = _normalize_for_menu_match(name)
     if not nk:
         return None
     lookup = _get_normalized_menu_lookup(rest_id)
-    return lookup.get(nk)
+    hit = lookup.get(nk)
+    if hit:
+        return hit
+    return _fuzzy_menu_item_match(rest_id, nk, name)
 
 
 def _resolve_items_to_ids(items_data: list, rest_id: Optional[str] = None) -> list:
