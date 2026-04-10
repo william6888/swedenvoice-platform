@@ -33,7 +33,7 @@
     {"id": 31, "name": "Mexicana", "aliases": ["mexikana", "mexi"], "price": 140, "description": "Lök, jalapeño, tacosås, köttfärs, vitlök"},
     {"id": 32, "name": "GSK-Special", "price": 140, "description": "Skinka, lök, bacon, fläskfilé, bearnaisesås"},
     {"id": 33, "name": "GIS-Special", "price": 140, "description": "Skinka, champinjoner, lök, fläskfilé, kebabsås"},
-    {"id": 34, "name": "Småland", "price": 140, "description": "Skinka, pommes, kebabsås"},
+    {"id": 34, "name": "Småland", "aliases": ["småland pizza", "smaland pizza"], "price": 140, "description": "Skinka, pommes, kebabsås"},
     {"id": 35, "name": "Kebabpizza", "price": 140, "description": "Lök, champinjoner, kebabkött, kebabsås"},
     {"id": 36, "name": "Batman", "price": 140, "description": "Skinka, kebabkött, kebabsås"},
     {"id": 37, "name": "Hammare", "price": 140, "description": "Kebabkött, pommes, kebabsås"},
