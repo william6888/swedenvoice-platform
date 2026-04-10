@@ -24,7 +24,7 @@
     {"id": 22, "name": "Quattro Stagioni", "price": 140, "description": "Skinka, champinjoner, räkor, musslor, oliver"},
     {"id": 23, "name": "John Blund", "price": 140, "description": "Skinka, champinjoner, bacon, ägg, lök"},
     {"id": 24, "name": "Lamare", "price": 140, "description": "Skinka, champinjoner, ananas, räkor"},
-    {"id": 25, "name": "Ciao-Ciao", "aliases": ["ciao", "ciao ciao"], "price": 140, "description": "Champinjoner, lök, vitlök, fläskfilé (inbakad)"},
+    {"id": 25, "name": "Ciao-Ciao", "aliases": ["chao", "chao chao"], "price": 140, "description": "Champinjoner, lök, vitlök, fläskfilé (inbakad)"},
     {"id": 26, "name": "Disco", "price": 140, "description": "Skinka, köttfärs, räkor"},
     {"id": 27, "name": "Vegetarisk", "price": 140, "description": "Lök, ananas, paprika, sparris, champinjoner, oliver"},
     {"id": 28, "name": "Biblos", "price": 140, "description": "Sparris, fläskfilé, bearnaisesås"},
@@ -59,7 +59,8 @@
     {"id": 55, "name": "Kebab med mos", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"},
     {"id": 56, "name": "Kebab med pommes", "price": 135, "description": "Kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
     {"id": 57, "name": "Lejon-Kebab", "price": 150, "description": "Nybakat bröd, kebabkött, sallad, tomat, gurka, lök, pommes, valfri sås"},
-    {"id": 76, "name": "Kebabtallrik", "price": 140, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"}
+    {"id": 76, "name": "Kebabtallrik", "price": 140, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"},
+    {"id": 99, "name": "Kebabtallrik med mos", "price": 140, "description": "Kebabkött, sallad, tomat, gurka, lök, mos, valfri sås"}
   ],
   "kyckling": [
     {"id": 58, "name": "Kyckling i bröd", "price": 140, "description": "Pitabröd, kyckling, sallad, tomat, lök, fefferoni, valfri sås"},
@@ -115,6 +116,9 @@
     {"id": 95, "name": "Räksallad (tillägg)", "price": 25, "description": ""},
     {"id": 96, "name": "Dubbel korv", "price": 50, "description": ""},
     {"id": 97, "name": "Ostskiva", "price": 10, "description": ""},
-    {"id": 98, "name": "Bacon", "price": 10, "description": ""}
+    {"id": 98, "name": "Bacon", "price": 10, "description": ""},
+    {"id": 100, "name": "Mild sås", "aliases": ["mildsås"], "price": 10, "description": ""},
+    {"id": 101, "name": "Extra sås", "aliases": ["extrasås"], "price": 10, "description": ""},
+    {"id": 102, "name": "Vitlöksås", "aliases": ["vitlökssås", "vitlök sås"], "price": 10, "description": ""}
   ]
 }
