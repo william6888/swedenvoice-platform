@@ -384,6 +384,19 @@ def _insert_order_to_supabase(
         print("⚠️  Supabase insert SKIPPED: _supabase_client is None (SUPABASE_URL/SUPABASE_KEY saknas eller init misslyckades vid start)")
         return False
 
+    def _normalize_order_status_for_ui(value: Optional[str]) -> str:
+        """Lovable/KDS UI expects: pending/ready/completed."""
+        v = (value or "").strip().lower()
+        if v in ("pending", "ready", "completed"):
+            return v
+        if v in ("nya", "ny", "new"):
+            return "pending"
+        if v in ("redo", "ready_to_pickup", "done"):
+            return "ready"
+        if v in ("klar", "completed", "complete"):
+            return "completed"
+        return "pending"
+
     def _build_row(include_special_instructions: bool, include_notes: bool):
         items_json = []
         for i in order.items:
@@ -399,7 +412,7 @@ def _insert_order_to_supabase(
             "customer_phone": customer_phone or "",
             "items": items_json,
             "total_price": float(order.total_price),
-            "status": "NYA",
+            "status": _normalize_order_status_for_ui(getattr(order, "status", None)),
             "raw_transcript": raw_transcript or "",
         }
         if include_special_instructions:
