@@ -16,6 +16,7 @@ from rapidfuzz import fuzz
 # WRatio 0–100 skalas till 0.0–1.0 för trösklar
 AUTO_SCORE = 0.92
 AMBIGUOUS_SCORE = 0.86
+SINGLE_SUGGESTION_AUTO_SCORE = 0.90
 MARGIN = 0.05
 
 _INDEX_TTL_SEC = 180
@@ -68,9 +69,16 @@ _LEADING_QTY = re.compile(
 
 
 def normalize_input_loose(text: str) -> str:
-    """Endast för fuzzy: normalisera + ev. inledande artikel/antal."""
+    """Endast för fuzzy: normalisera + ev. inledande artikel/antal + borttag av generiska suffixord."""
     t = normalize(text)
     t = _LEADING_QTY.sub("", t)
+    # Ta bort ord som ofta läggs på i tal men inte ingår i menynamn.
+    # Vi tar bara bort om det finns fler än ett token för att undvika att "förstöra" korta namn.
+    tokens = [p for p in t.split(" ") if p]
+    if len(tokens) > 1:
+        drop = {"pizza", "pizzan", "pizzor", "pizzorna"}
+        tokens = [p for p in tokens if p not in drop]
+        t = " ".join(tokens)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -123,6 +131,30 @@ class MenuIndex:
         if not nl:
             print('MENU_MATCH rest_id=%s type=no_match input=%r (tom efter loose)' % (rest_id_log, input_name[:120]))
             return {"type": "no_match"}
+
+        # Efter "loose" normalisering kan vi ibland landa på en exakt/alias-nyckel.
+        # Ex: "Småland Pizza" -> "smaland" som finns i lookup.
+        if nl in self.lookup:
+            iid = self.lookup[nl]
+            kind = self.key_kind.get(nl, "canonical")
+            out_type = "alias" if kind == "alias" else "exact"
+            canon = self.canonical_by_id[iid]
+            print(
+                'MENU_MATCH rest_id=%s type=%s input=%r -> %r id=%s (via loose exact)'
+                % (rest_id_log, out_type, input_name[:120], canon[:80], iid)
+            )
+            return {"type": out_type, "itemId": iid, "canonicalName": canon}
+        nls = nl.replace(" ", "")
+        if nls and nls in self.lookup:
+            iid = self.lookup[nls]
+            kind = self.key_kind.get(nls, "canonical")
+            out_type = "alias" if kind == "alias" else "exact"
+            canon = self.canonical_by_id[iid]
+            print(
+                'MENU_MATCH rest_id=%s type=%s input=%r -> %r id=%s (via loose exact nospace)'
+                % (rest_id_log, out_type, input_name[:120], canon[:80], iid)
+            )
+            return {"type": out_type, "itemId": iid, "canonicalName": canon}
 
         scored: List[Tuple[float, int]] = []
         for item_id, cand_norm in self.fuzzy_candidates:
@@ -319,7 +351,6 @@ def resolve_order_items(
             row["id"] = by_id
             row["name"] = name
             resolved.append(row)
-            pos += 1
             continue
 
         name_in = (d.get("name") or "").strip()
@@ -347,14 +378,35 @@ def resolve_order_items(
             row["name"] = canon
             resolved.append(row)
         elif mt == "fuzzy_ambiguous":
+            # Om vi bara har en kandidat och den är stark nog, auto-acceptera istället för att stoppa ordern.
+            sug = m.get("suggestions") or []
+            scores = m.get("scores") or []
+            if len(sug) == 1 and scores:
+                try:
+                    sc0 = float(scores[0])
+                except (TypeError, ValueError):
+                    sc0 = 0.0
+                if sc0 >= SINGLE_SUGGESTION_AUTO_SCORE:
+                    target_name = sug[0]
+                    target_id = None
+                    for _id, _canon in index.canonical_by_id.items():
+                        if _canon == target_name:
+                            target_id = _id
+                            break
+                    if target_id is not None:
+                        row = dict(d)
+                        row["id"] = target_id
+                        row["name"] = target_name
+                        resolved.append(row)
+                        continue
             unmatched.append(
                 {
                     "index": i,
                     "input": name_in,
                     "match": {
                         "type": "fuzzy_ambiguous",
-                        "suggestions": m.get("suggestions") or [],
-                        "scores": m.get("scores") or [],
+                        "suggestions": sug,
+                        "scores": scores,
                     },
                 }
             )
