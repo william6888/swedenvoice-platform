@@ -1133,6 +1133,7 @@ async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100
         lim = 100
     lim = max(1, min(lim, 500))
 
+    # Håll stopwords konservativt: ta bort konnektorer, men INTE matord som "mos/pommes".
     stopwords = {
         "och",
         "med",
@@ -1141,11 +1142,6 @@ async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100
         "ett",
         "tillagg",
         "tillägg",
-        "bröd",
-        "tallrik",
-        "mos",
-        "pommes",
-        "strips",
     }
 
     menu = get_menu_cached(rest_id)
