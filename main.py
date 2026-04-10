@@ -1042,6 +1042,74 @@ async def get_menu(rest_id: Optional[str] = None):
     return JSONResponse(content=menu)
 
 
+@app.post("/match_menu")
+async def match_menu(request: Request, rest_id: Optional[str] = None):
+    """Read-only menu matching. Validates item names against the menu without creating an order."""
+    rest_id = (rest_id or "").strip() or "Gislegrillen_01"
+    body = await request.json()
+    raw_items = body.get("items")
+    if not isinstance(raw_items, list) or len(raw_items) == 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Request body must contain a non-empty 'items' array."},
+        )
+
+    menu = get_menu_cached(rest_id)
+    index = menu_match.get_or_build_menu_index(rest_id, menu)
+    if index is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Menyn kunde inte laddas."},
+        )
+
+    matched: list = []
+    ambiguous: list = []
+    unmatched: list = []
+
+    for i, entry in enumerate(raw_items):
+        name_in = ""
+        if isinstance(entry, dict):
+            name_in = (entry.get("name") or entry.get("raw") or "").strip()
+        elif isinstance(entry, str):
+            name_in = entry.strip()
+        if not name_in:
+            unmatched.append({"index": i, "input": ""})
+            continue
+
+        m = index.match_one(name_in, rest_id)
+        mt = m.get("type")
+
+        if mt in ("exact", "alias", "fuzzy_auto"):
+            item_id = m["itemId"]
+            menu_item = find_menu_item(item_id, rest_id)
+            price = menu_item["price"] if menu_item else None
+            confidence = 1.0 if mt in ("exact", "alias") else round(m.get("score", 0.0), 4)
+            matched.append({
+                "index": i,
+                "input": name_in,
+                "menuId": item_id,
+                "menuName": m["canonicalName"],
+                "price": price,
+                "matchType": mt,
+                "confidence": confidence,
+            })
+        elif mt == "fuzzy_ambiguous":
+            ambiguous.append({
+                "index": i,
+                "input": name_in,
+                "candidates": m.get("suggestions", []),
+                "scores": m.get("scores", []),
+            })
+        else:
+            unmatched.append({"index": i, "input": name_in})
+
+    return JSONResponse(content={
+        "matchedItems": matched,
+        "ambiguousItems": ambiguous,
+        "unmatchedItems": unmatched,
+    })
+
+
 def _sanitize_keyword(s: str, max_len: int = 50) -> str:
     """Tillåt bokstaver (åäö), siffror, mellanslag, bindestreck, apostrof, parenteser. Truncera till max_len."""
     # Behåll \w (bokstaver/siffror), \s, samt - ' ( ) så att "Ciao-Ciao", "Pizza (stor)" osv. behålls
@@ -1051,13 +1119,31 @@ def _sanitize_keyword(s: str, max_len: int = 50) -> str:
 
 
 @app.get("/api/keywords")
-async def get_keywords(rest_id: Optional[str] = None):
+async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100):
     """
     Return product names as keywords/keyterms for Vapi/Speechmatics keyword boosting.
     - keywords: single words (sanitized, max 50 chars)
     - keyterms: full product names as phrases (sanitized, max 50 chars).
     Optional rest_id for future per-tenant menu.
     """
+    # Deepgram/Vapi brukar ha hårda gränser per request; defaulta till 100 så detta blir copy/paste.
+    try:
+        lim = int(limit) if limit is not None else 100
+    except Exception:
+        lim = 100
+    lim = max(1, min(lim, 500))
+
+    # Håll stopwords konservativt: ta bort konnektorer, men INTE matord som "mos/pommes".
+    stopwords = {
+        "och",
+        "med",
+        "i",
+        "en",
+        "ett",
+        "tillagg",
+        "tillägg",
+    }
+
     menu = get_menu_cached(rest_id)
     keyterms_set = set()
     words_set = set()
@@ -1073,12 +1159,27 @@ async def get_keywords(rest_id: Optional[str] = None):
                 keyterms_set.add(term)
             for word in name.split():
                 w = _sanitize_keyword(word.strip())
-                if w and len(w) > 1:
-                    words_set.add(w)
-    return JSONResponse(content={
-        "keywords": sorted(words_set),
-        "keyterms": sorted(keyterms_set),
-    })
+                if not w:
+                    continue
+                wl = w.lower()
+                if len(wl) <= 1:
+                    continue
+                if wl in stopwords:
+                    continue
+                words_set.add(w)
+            # Ta gärna med aliases också för STT-boost (t.ex. capriciosa/capricciosa)
+            aliases = item.get("aliases")
+            if isinstance(aliases, list):
+                for a in aliases:
+                    if not isinstance(a, str):
+                        continue
+                    aw = _sanitize_keyword(a.strip())
+                    if aw and len(aw) > 1:
+                        words_set.add(aw)
+
+    keyterms = sorted(keyterms_set)[:lim]
+    keywords = sorted(words_set)[:lim]
+    return JSONResponse(content={"keywords": keywords, "keyterms": keyterms})
 
 @app.get("/orders")
 async def get_orders():
