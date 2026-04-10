@@ -91,7 +91,7 @@
     {"id": 75, "name": "Stor snitzare med strips", "price": 115, "description": "Bröd, ost, paprika, citronpeppar"}
   ],
   "hamburgare": [
-    {"id": 77, "name": "90g i bröd", "price": 65, "description": "90g hamburgare i bröd"},
+    {"id": 77, "name": "90g i bröd", "aliases": ["hamburgare 90g", "hamburgare90g", "90g hamburgare"], "price": 65, "description": "90g hamburgare i bröd"},
     {"id": 78, "name": "90g tallrik", "price": 95, "description": "90g hamburgare med strips eller mos"},
     {"id": 79, "name": "150g i bröd", "price": 75, "description": "150g hamburgare i bröd"},
     {"id": 80, "name": "150g tallrik", "price": 105, "description": "150g hamburgare med strips eller mos"},
