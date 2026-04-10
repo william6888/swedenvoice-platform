@@ -30,7 +30,7 @@
     {"id": 28, "name": "Biblos", "price": 140, "description": "Sparris, fläskfilé, bearnaisesås"},
     {"id": 29, "name": "Salami", "price": 140, "description": "Lök, paprika, salami, kebabsås"},
     {"id": 30, "name": "Azteka", "price": 140, "description": "Skinka, jalapeño, tacosås, kebabsås"},
-    {"id": 31, "name": "Mexicana", "price": 140, "description": "Lök, jalapeño, tacosås, köttfärs, vitlök"},
+    {"id": 31, "name": "Mexicana", "aliases": ["mexikana", "mexi"], "price": 140, "description": "Lök, jalapeño, tacosås, köttfärs, vitlök"},
     {"id": 32, "name": "GSK-Special", "price": 140, "description": "Skinka, lök, bacon, fläskfilé, bearnaisesås"},
     {"id": 33, "name": "GIS-Special", "price": 140, "description": "Skinka, champinjoner, lök, fläskfilé, kebabsås"},
     {"id": 34, "name": "Småland", "price": 140, "description": "Skinka, pommes, kebabsås"},
@@ -50,7 +50,7 @@
     {"id": 48, "name": "Gislaved", "price": 145, "description": "Kyckling, pommes, kebabsås"},
     {"id": 49, "name": "IBBE-Special", "price": 150, "description": "Lök, kebabkött, pommes, sallad, kebabsås"},
     {"id": 50, "name": "ALEX-Special", "price": 150, "description": "Lök, kyckling, pommes, sallad, kebabsås"},
-    {"id": 51, "name": "Black Jack", "price": 150, "description": "Fläskfilé, oxfilé, kebabkött, kebabsås, bearnaisesås"},
+    {"id": 51, "name": "Black Jack", "aliases": ["blackjack"], "price": 150, "description": "Fläskfilé, oxfilé, kebabkött, kebabsås, bearnaisesås"},
     {"id": 52, "name": "Polisen", "price": 150, "description": "Skinka, champinjoner, ananas, räkor, kebabkött, kebabsås"}
   ],
   "kebabs": [
