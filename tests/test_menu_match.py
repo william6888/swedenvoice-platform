@@ -20,6 +20,12 @@ class TestNormalize(unittest.TestCase):
     def test_gram_suffix(self):
         self.assertIn("gram", menu_match.normalize("90g i bröd"))
 
+    def test_stt_grams_plural(self):
+        self.assertEqual(
+            menu_match.normalize("etthundrafemtio grams"),
+            "etthundrafemtio gram",
+        )
+
 
 class TestCollision(unittest.TestCase):
     def test_collision_removes_key_from_lookup(self):
@@ -35,6 +41,35 @@ class TestCollision(unittest.TestCase):
 
 
 class TestExactAndAlias(unittest.TestCase):
+    def test_spoken_grams_with_leading_article(self):
+        """STT: 'en etthundrafemtio grams hamburgare' ska matcha samma alias som utan 'en '."""
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("en etthundrafemtio grams hamburgare", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "150g i bröd")
+
+    def test_stt_weight_only_without_hamburgare_word(self):
+        """Speechmatics kan skriva bara vikt, t.ex. 'en etthundrafemtio grams' utan 'hamburgare'."""
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("En etthundrafemtio grams", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "150g i bröd")
+
+    def test_hamburger_tallrik_requires_tallrik_in_phrase(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("150 gram tallrik", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "150g tallrik")
+
     def test_margarita_alias(self):
         root = Path(__file__).resolve().parent.parent
         with open(root / "menu.json", "r", encoding="utf-8") as f:

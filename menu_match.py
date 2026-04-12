@@ -56,6 +56,9 @@ def normalize(text: str) -> str:
     for old in ("-", "_", ".", ",", "/"):
         t = t.replace(old, " ")
     t = re.sub(r"\s+", " ", t).strip()
+    # STT: "etthundrafemtio grams" → samma nyckel som "... gram"
+    t = re.sub(r"\bgrams\b", "gram", t)
+    t = re.sub(r"\s+", " ", t).strip()
     # 90g → 90 gram (samma som i menynamn med gramvikter)
     t = re.sub(r"(\d)\s*g\b", r"\1 gram", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+", " ", t).strip()
@@ -128,6 +131,37 @@ class MenuIndex:
             }
 
         nl = normalize_input_loose(input_name)
+        # Tal/STT: "en etthundrafemtio grams hamburgare" → samma alias som utan inledande artikel
+        if nl and nl != n and nl in self.lookup:
+            iid = self.lookup[nl]
+            kind = self.key_kind.get(nl, "canonical")
+            out_type = "alias" if kind == "alias" else "exact"
+            canon = self.canonical_by_id[iid]
+            print(
+                'MENU_MATCH rest_id=%s type=%s input=%r -> %r id=%s'
+                % (rest_id_log, out_type, input_name[:120], canon[:80], iid)
+            )
+            return {
+                "type": out_type,
+                "itemId": iid,
+                "canonicalName": canon,
+            }
+        nls = nl.replace(" ", "") if nl else ""
+        if nls and nls != ns and nls in self.lookup:
+            iid = self.lookup[nls]
+            kind = self.key_kind.get(nls, "canonical")
+            out_type = "alias" if kind == "alias" else "exact"
+            canon = self.canonical_by_id[iid]
+            print(
+                'MENU_MATCH rest_id=%s type=%s input=%r -> %r id=%s'
+                % (rest_id_log, out_type, input_name[:120], canon[:80], iid)
+            )
+            return {
+                "type": out_type,
+                "itemId": iid,
+                "canonicalName": canon,
+            }
+
         if not nl:
             print('MENU_MATCH rest_id=%s type=no_match input=%r (tom efter loose)' % (rest_id_log, input_name[:120]))
             return {"type": "no_match"}
