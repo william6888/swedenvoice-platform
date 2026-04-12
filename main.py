@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
 import requests
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -420,6 +420,11 @@ def _insert_order_to_supabase(
         uuid_val = restaurant_uuid or RESTAURANT_UUID
         if uuid_val:
             row["restaurant_uuid"] = uuid_val
+        else:
+            print(
+                "⚠️  Supabase-rad saknar restaurant_uuid (sätt RESTAURANT_UUID i Railway eller "
+                "rad i public.restaurants med external_id). Lovable kan filtrera bort ordern."
+            )
         return row
 
     def _do_insert(row: dict):
@@ -427,6 +432,13 @@ def _insert_order_to_supabase(
         err = getattr(resp, "error", None)
         if err:
             raise RuntimeError(str(err))
+        data = getattr(resp, "data", None)
+        if not data:
+            # RLS eller fel kan ge 200 med tom data utan exception (beroende på klient)
+            raise RuntimeError(
+                "Supabase orders.insert returnerade inga rader. Kontrollera RLS policies (INSERT för service_role) "
+                "och att SUPABASE_KEY är service_role om Lovable/KDS ska se ordrar."
+            )
         return True
 
     # Först med special_instructions och notes (full funktionalitet)
@@ -734,10 +746,18 @@ def _refresh_active_tenant_set() -> None:
 
 
 def _is_tenant_active(restaurant_uuid: Optional[str]) -> bool:
-    """Returnera True om restaurant_uuid finns i aktiva-tenant-set. Uppdaterar set om det är för gammalt."""
+    """Returnera True om restaurant_uuid finns i aktiva-tenant-set. Uppdaterar set om det är för gammalt.
+    Saknas UUID (legacy) eller är aktiv-listan tom efter refresh (t.ex. RLS döljer restaurants) → tillåt
+    ändå så att ordrar/SMS/Supabase inte blockeras av en tom cache."""
     if not restaurant_uuid:
-        return False
+        return True
     _refresh_active_tenant_set()
+    if not _ACTIVE_TENANT_UUIDS:
+        print(
+            "⚠️  _ACTIVE_TENANT_UUIDS är tom (kolla RLS på restaurants eller DB). "
+            "Tillåter ändå webhook för rest_uuid=%s…" % (str(restaurant_uuid)[:8],)
+        )
+        return True
     return str(restaurant_uuid) in _ACTIVE_TENANT_UUIDS
 
 
@@ -921,14 +941,9 @@ def _run_sms_and_alert_on_failure(order_dict: dict, customer_phone: Optional[str
         _send_sms_failure_alert(rest_id, order.order_id, "Vonage returnerade fel eller ingen telefon")
 
 
-def schedule_sms_with_alert_on_failure(
-    background_tasks: BackgroundTasks,
-    order: Order,
-    customer_phone: Optional[str],
-    rest_id: str,
-) -> None:
-    """Lägg SMS i bakgrunden; vid fel loggas [ALERT] i serverloggar. Använd i webhook och place_order."""
-    background_tasks.add_task(_run_sms_and_alert_on_failure, order.model_dump(), customer_phone, rest_id)
+def send_customer_sms_now(order: Order, customer_phone: Optional[str], rest_id: str) -> None:
+    """Skicka SMS synkront (samma HTTP-request som ordern). Bakgrundstasker kan annars hinner inte köras klart."""
+    _run_sms_and_alert_on_failure(order.model_dump(), customer_phone, rest_id)
 
 
 def _token_bucket_allow(rest_id: str) -> bool:
@@ -1300,7 +1315,7 @@ def _process_place_order(
 
 
 @app.post("/place_order")
-async def place_order(request: Request, background_tasks: BackgroundTasks):
+async def place_order(request: Request):
     """
     Main order placement endpoint - Called by Vapi tool OR direct API.
     Supports both Vapi tool-calls format and direct JSON format.
@@ -1368,7 +1383,19 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                         order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         raw_transcript = _get_raw_transcript_from_webhook(body)
-                        _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
+                        sb_ok = _insert_order_to_supabase(
+                            order,
+                            restaurant_id,
+                            customer_name=customer_name,
+                            customer_phone=customer_phone,
+                            raw_transcript=raw_transcript,
+                            restaurant_uuid=restaurant_uuid,
+                        )
+                        if not sb_ok:
+                            print(
+                                "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
+                                % order.order_id
+                            )
                         _circuit_breaker_record_success(rest_id)
                         results.append({
                             "name": "place_order",
@@ -1380,7 +1407,9 @@ async def place_order(request: Request, background_tasks: BackgroundTasks):
                             })
                         })
                         if customer_phone:
-                            schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
+                            send_customer_sms_now(order, customer_phone, rest_id)
+                        else:
+                            print("⚠️  Ingen kundtelefon i body – SMS till kund skickades inte")
                     except Exception as e:
                         print(f"❌ place_order exception: {e}")
                         if _circuit_breaker_record_failure(rest_id):
@@ -1551,7 +1580,7 @@ async def admin_soft_delete_tenant(rest_id: str, request: Request):
 
 @app.post("/vapi/webhook")
 @app.post("/vapi-webhook")
-async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
+async def vapi_webhook(request: Request):
     """
     Vapi webhook – tenant-blind, request-isolerad.
     - rest_id från query (?rest_id=...) eller body → lookup i Supabase restaurants → (restaurant_id, restaurant_uuid).
@@ -1629,7 +1658,19 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     raw_transcript = _get_raw_transcript_from_webhook(body)
-                    _insert_order_to_supabase(order, restaurant_id, customer_name=customer_name, customer_phone=customer_phone, raw_transcript=raw_transcript, restaurant_uuid=restaurant_uuid)
+                    sb_ok = _insert_order_to_supabase(
+                        order,
+                        restaurant_id,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        raw_transcript=raw_transcript,
+                        restaurant_uuid=restaurant_uuid,
+                    )
+                    if not sb_ok:
+                        print(
+                            "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
+                            % order.order_id
+                        )
                     _circuit_breaker_record_success(rest_id)
                     results.append({
                         "name": "place_order",
@@ -1642,9 +1683,9 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
                     if customer_phone:
-                        schedule_sms_with_alert_on_failure(background_tasks, order, customer_phone, rest_id)
+                        send_customer_sms_now(order, customer_phone, rest_id)
                     else:
-                        print("⚠️  Ingen kundtelefon i webhook – SMS ej schemalagt")
+                        print("⚠️  Ingen kundtelefon i webhook – SMS till kund skickades inte")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
                     if _circuit_breaker_record_failure(rest_id):
@@ -1707,7 +1748,6 @@ if __name__ == "__main__":
     print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
-    
     print("\n✅ Server ready to accept orders!\n")
     
     # Run server
