@@ -45,6 +45,23 @@ class TestCustomerPhoneExtraction(unittest.TestCase):
         }
         self.assertIsNone(main._get_customer_phone_from_webhook(body))
 
+    def test_does_not_use_restaurant_contact_number_as_customer(self):
+        body = {"message": {"call": {"customer": {"number": "+46760445700"}}}}
+        self.assertIsNone(main._get_customer_phone_from_webhook(body))
+
+    def test_sms_result_blocks_restaurant_contact_number(self):
+        order = main.Order(
+            order_id="ORD-TEST",
+            items=[],
+            special_requests=None,
+            total_price=0,
+            status="pending",
+            timestamp="2026-05-13 00:00:00",
+        )
+        result = main._send_sms_order_confirmation_result(order, "+46760445700")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "blocked_business_or_provider_number")
+
     def test_extracts_phone_from_tool_params_when_vapi_sends_direct_args(self):
         body = {"message": {"call": {"to": "+46760445700"}}}
         params = {"items": [{"id": 1, "quantity": 1}], "customer_phone": "070-765 43 21"}

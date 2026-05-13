@@ -77,6 +77,8 @@ ADMIN_SECRET = _clean_env_value("ADMIN_SECRET")
 # Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
 # I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
 WEBHOOK_SHARED_SECRET = _clean_env_value("WEBHOOK_SHARED_SECRET")
+RESTAURANT_CONTACT_NUMBER = _clean_env_value("RESTAURANT_CONTACT_NUMBER", "+46760445700")
+SMS_EXCLUDED_NUMBERS = _clean_env_value("SMS_EXCLUDED_NUMBERS")
 
 # Fas 2: Kryptering av tenant-nycklar (restaurant_secrets)
 ENCRYPTION_SECRET = _clean_env_value("ENCRYPTION_SECRET")
@@ -520,6 +522,18 @@ def _normalize_phone_for_sms(value: Any) -> Optional[str]:
     return "+" + digits
 
 
+def _blocked_sms_recipient_numbers() -> set:
+    blocked = {VONAGE_FROM_NUMBER, RESTAURANT_CONTACT_NUMBER}
+    if SMS_EXCLUDED_NUMBERS:
+        blocked.update(part.strip() for part in SMS_EXCLUDED_NUMBERS.split(","))
+    return {n for raw in blocked if (n := _normalize_phone_for_sms(raw))}
+
+
+def _is_blocked_sms_recipient(phone: Optional[str]) -> bool:
+    normalized = _normalize_phone_for_sms(phone)
+    return bool(normalized and normalized in _blocked_sms_recipient_numbers())
+
+
 def _first_phone_from_paths(source: dict, paths: List[Tuple[str, ...]]) -> Optional[str]:
     for path in paths:
         cur: Any = source
@@ -585,6 +599,9 @@ def _send_sms_order_confirmation_result(order: Order, to_number: str) -> dict:
     if not to:
         print("⚠️  No valid customer phone number. Skipping SMS.")
         return {"ok": False, "to": "", "error": "missing_or_invalid_customer_phone"}
+    if _is_blocked_sms_recipient(to):
+        print("⚠️  SMS recipient is a restaurant/provider number, not a customer. Skipping SMS.")
+        return {"ok": False, "to": to, "error": "blocked_business_or_provider_number"}
     if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
         print("⚠️  Vonage not configured. Skipping SMS.")
         return {"ok": False, "to": to, "error": "vonage_not_configured"}
@@ -666,9 +683,17 @@ def _get_customer_phone_from_webhook(body: dict, params: Optional[dict] = None) 
     for source, paths_to_try in ((params or {}, param_paths), (body, body_paths)):
         phone = _first_phone_from_paths(source, list(paths_to_try))
         if phone:
+            if _is_blocked_sms_recipient(phone):
+                print("DEBUG SMS: candidate phone is restaurant/provider number, ignoring")
+                phone = None
+                continue
             break
         phone = _recursive_customer_phone_search(source)
         if phone:
+            if _is_blocked_sms_recipient(phone):
+                print("DEBUG SMS: recursive candidate phone is restaurant/provider number, ignoring")
+                phone = None
+                continue
             break
     print(f"DEBUG SMS: phone sökväg -> found={'YES' if phone else 'NO'}")
     return phone
@@ -1107,6 +1132,8 @@ def _run_sms_and_alert_on_failure(
         return
     error_msg = result.get("error") or "Vonage returnerade fel eller ingen telefon"
     status = "missing_phone" if error_msg == "missing_or_invalid_customer_phone" else "failed"
+    if error_msg == "blocked_business_or_provider_number":
+        status = "blocked_recipient"
     _update_order_sms_status(db_order_id, order.order_id, status, result.get("to", ""), error_msg)
     _send_sms_failure_alert(rest_id, order.order_id, error_msg)
 
