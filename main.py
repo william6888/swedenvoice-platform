@@ -42,11 +42,17 @@ if not os.getenv("ADMIN_SECRET") and _env_path.exists():
     except Exception:
         pass
 
+
+def _clean_env_value(name: str, default: str = "") -> str:
+    """Läs env-värde och ta bort whitespace som annars kan bryta strikt API-auth."""
+    return (os.getenv(name, default) or default).strip()
+
+
 # Configuration (måste vara före Supabase-init)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_URL = _clean_env_value("SUPABASE_URL")
+SUPABASE_KEY = _clean_env_value("SUPABASE_KEY")
 # Multi-tenancy: UUID för denna restaurang (från public.restaurants). Sätts när Supabase har restaurant_uuid.
-RESTAURANT_UUID = os.getenv("RESTAURANT_UUID", "").strip() or None
+RESTAURANT_UUID = _clean_env_value("RESTAURANT_UUID") or None
 
 # Supabase client (optional – används för KDS/Lovable Dashboard)
 _supabase_client = None
@@ -60,20 +66,20 @@ if SUPABASE_URL and SUPABASE_KEY:
         print(f"⚠️  Supabase init failed: {e}")
 
 # Configuration
-VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
-VONAGE_API_KEY = os.getenv("VONAGE_API_KEY", "")
-VONAGE_API_SECRET = os.getenv("VONAGE_API_SECRET", "")
-VONAGE_FROM_NUMBER = os.getenv("VONAGE_FROM_NUMBER", "")
-HOST = os.getenv("HOST", "0.0.0.0")
+VAPI_API_KEY = _clean_env_value("VAPI_API_KEY")
+VONAGE_API_KEY = _clean_env_value("VONAGE_API_KEY")
+VONAGE_API_SECRET = _clean_env_value("VONAGE_API_SECRET")
+VONAGE_FROM_NUMBER = _clean_env_value("VONAGE_FROM_NUMBER")
+HOST = _clean_env_value("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 # Fas 1 Safety Net: admin-endpoint
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
+ADMIN_SECRET = _clean_env_value("ADMIN_SECRET")
 # Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
 # I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
-WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
+WEBHOOK_SHARED_SECRET = _clean_env_value("WEBHOOK_SHARED_SECRET")
 
 # Fas 2: Kryptering av tenant-nycklar (restaurant_secrets)
-ENCRYPTION_SECRET = os.getenv("ENCRYPTION_SECRET", "").strip()
+ENCRYPTION_SECRET = _clean_env_value("ENCRYPTION_SECRET")
 _fernet = None
 if ENCRYPTION_SECRET:
     try:
@@ -376,13 +382,13 @@ def _insert_order_to_supabase(
     customer_phone: Optional[str] = None,
     raw_transcript: Optional[str] = None,
     restaurant_uuid: Optional[str] = None,
-) -> bool:
-    """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar True vid lyckad insert.
+) -> Optional[str]:
+    """Insert order to Supabase (orders-tabell för KDS/Lovable Dashboard). Returnerar DB-radens id vid lyckad insert.
     restaurant_uuid: om None används RESTAURANT_UUID (bakåtkompat).
     Om kolumnen special_instructions saknas i DB försöker vi fallback utan den (order sparas ändå)."""
     if not _supabase_client:
         print("⚠️  Supabase insert SKIPPED: _supabase_client is None (SUPABASE_URL/SUPABASE_KEY saknas eller init misslyckades vid start)")
-        return False
+        return None
 
     def _normalize_order_status_for_ui(value: Optional[str]) -> str:
         """Lovable/KDS UI expects: pending/ready/completed."""
@@ -397,7 +403,7 @@ def _insert_order_to_supabase(
             return "completed"
         return "pending"
 
-    def _build_row(include_special_instructions: bool, include_notes: bool):
+    def _build_row(include_special_instructions: bool, include_notes: bool, include_sms_tracking: bool):
         items_json = []
         for i in order.items:
             item = {"id": i.id, "name": i.name, "quantity": i.quantity, "price": i.price}
@@ -415,6 +421,10 @@ def _insert_order_to_supabase(
             "status": _normalize_order_status_for_ui(getattr(order, "status", None)),
             "raw_transcript": raw_transcript or "",
         }
+        if include_sms_tracking:
+            row["order_id"] = order.order_id
+            row["sms_status"] = "pending" if customer_phone else "missing_phone"
+            row["sms_to"] = customer_phone or ""
         if include_special_instructions:
             row["special_instructions"] = (order.special_requests or "").strip() or ""
         uuid_val = restaurant_uuid or RESTAURANT_UUID
@@ -439,34 +449,40 @@ def _insert_order_to_supabase(
                 "Supabase orders.insert returnerade inga rader. Kontrollera RLS policies (INSERT för service_role) "
                 "och att SUPABASE_KEY är service_role om Lovable/KDS ska se ordrar."
             )
-        return True
+        inserted = data[0] if isinstance(data, list) and data else {}
+        return str(inserted.get("id") or "") or None
 
     # Först med special_instructions och notes (full funktionalitet)
     try:
-        row = _build_row(include_special_instructions=True, include_notes=True)
-        _do_insert(row)
+        row = _build_row(include_special_instructions=True, include_notes=True, include_sms_tracking=True)
+        db_order_id = _do_insert(row)
         print(f"✅ Order {order.order_id} sparad till Supabase (restaurant_id={restaurant_id})")
-        return True
+        return db_order_id
     except Exception as e:
         err_str = str(e).lower()
-        # Kolumn saknas eller liknande – försök utan special_instructions och notes
+        # Kolumn saknas eller liknande – försök utan optionala fält.
         is_column_error = (
             "special_instructions" in err_str
             or "notes" in err_str
+            or "order_id" in err_str
+            or "sms_status" in err_str
+            or "sms_to" in err_str
+            or "sms_last_error" in err_str
+            or "sms_sent_at" in err_str
             or ("column" in err_str and ("does not exist" in err_str or "undefined_column" in err_str))
         )
         if is_column_error:
-            print("⚠️  Supabase: kolumn special_instructions eller notes saknas – sparar utan dem. Kör SUPABASE_ADD_SPECIAL_INSTRUCTIONS.sql i Supabase för full funktion.")
+            print("⚠️  Supabase: optionala kolumner saknas – sparar order utan vissa metadata. Kör senaste Supabase-migrationen för full SMS-spårning.")
             try:
-                row = _build_row(include_special_instructions=False, include_notes=False)
-                _do_insert(row)
+                row = _build_row(include_special_instructions=False, include_notes=False, include_sms_tracking=False)
+                db_order_id = _do_insert(row)
                 print(f"✅ Order {order.order_id} sparad till Supabase (fallback, restaurant_id={restaurant_id})")
-                return True
+                return db_order_id
             except Exception as e2:
                 print(f"⚠️  Supabase insert failed (fallback): {e2}")
-                return False
+                return None
         print(f"⚠️  Supabase insert failed: {e}")
-        return False
+        return None
 
 
 def _format_order_sms(order: Order) -> str:
@@ -480,26 +496,105 @@ def _format_order_sms(order: Order) -> str:
     lines.extend(["", "Är din beställning felaktig? Ring oss: +46760445700"])
     return "\n".join(lines)
 
+
+def _normalize_phone_for_sms(value: Any) -> Optional[str]:
+    """Normalisera kundnummer till E.164-liknande format. Returnerar None för osäkra värden."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    raw = re.sub(r"^(tel:|sms:)", "", raw, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"[^\d+]", "", raw)
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    digits = re.sub(r"\D", "", cleaned)
+    if len(digits) < 7 or len(digits) > 15:
+        return None
+    if cleaned.startswith("+"):
+        return "+" + digits
+    if digits.startswith("0") and len(digits) > 1:
+        return "+46" + digits[1:]
+    if digits.startswith("46"):
+        return "+" + digits
+    return "+" + digits
+
+
+def _first_phone_from_paths(source: dict, paths: List[Tuple[str, ...]]) -> Optional[str]:
+    for path in paths:
+        cur: Any = source
+        for key in path:
+            if not isinstance(cur, dict):
+                cur = None
+                break
+            cur = cur.get(key)
+        phone = _normalize_phone_for_sms(cur)
+        if phone:
+            return phone
+    return None
+
+
+def _recursive_customer_phone_search(value: Any, path: Tuple[str, ...] = ()) -> Optional[str]:
+    """Sök försiktigt efter kund-/caller-nummer utan att råka ta restaurangens destination/to-nummer."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            path_norm = tuple(re.sub(r"[^a-z0-9]", "", str(p).lower()) for p in path)
+            in_customer_context = any(p in {"customer", "caller", "from"} for p in path_norm)
+            safe_key = (
+                key_norm in {"from", "caller", "callerid", "callernumber", "callerphone"}
+                or ("customer" in key_norm and ("number" in key_norm or "phone" in key_norm))
+                or (in_customer_context and key_norm in {"number", "phone", "phonenumber", "mobile"})
+            )
+            blocked_key = (
+                key_norm in {"to", "destination", "phonenumberid", "id"}
+                or "assistant" in key_norm
+                or "restaurant" in key_norm
+                or "business" in key_norm
+                or "twilio" in key_norm
+                or "vonage" in key_norm
+            )
+            if safe_key and not blocked_key:
+                phone = _normalize_phone_for_sms(child)
+                if phone:
+                    return phone
+            if not blocked_key and isinstance(child, (dict, list)):
+                phone = _recursive_customer_phone_search(child, path + (str(key),))
+                if phone:
+                    return phone
+    elif isinstance(value, list):
+        for child in value:
+            phone = _recursive_customer_phone_search(child, path)
+            if phone:
+                return phone
+    return None
+
+
 def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
     """
     Skicka SMS-orderbekräftelse via Vonage.
     Returnerar True vid lyckat skickande, False annars.
     Blockerar ALDRIG – fel loggas men kastas inte.
     """
+    return _send_sms_order_confirmation_result(order, to_number)["ok"]
+
+
+def _send_sms_order_confirmation_result(order: Order, to_number: str) -> dict:
+    """Skicka SMS och returnera strukturerad status för Supabase-spårning."""
+    to = _normalize_phone_for_sms(to_number)
+    if not to:
+        print("⚠️  No valid customer phone number. Skipping SMS.")
+        return {"ok": False, "to": "", "error": "missing_or_invalid_customer_phone"}
     if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
         print("⚠️  Vonage not configured. Skipping SMS.")
-        return False
+        return {"ok": False, "to": to, "error": "vonage_not_configured"}
     print(f"DEBUG SMS: Vonage config OK, calling API for to_number={to_number}")
-    if not to_number or not str(to_number).strip():
-        print("⚠️  No customer phone number. Skipping SMS.")
-        return False
-    to = str(to_number).strip().replace(" ", "").replace("-", "")
-    if not to.startswith("+"):
-        to = ("+46" + to[1:]) if to.startswith("0") and len(to) > 1 else "+" + to
     text = _format_order_sms(order)
     try:
         r = requests.post(
             "https://rest.nexmo.com/sms/json",
+            # requests encodes this as application/x-www-form-urlencoded, including
+            # special characters in credentials/text required by Vonage's stricter parser.
             data={
                 "api_key": VONAGE_API_KEY,
                 "api_secret": VONAGE_API_SECRET,
@@ -514,33 +609,68 @@ def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
         print(f"DEBUG SMS: Vonage API response status={r.status_code}, data={json.dumps(data, ensure_ascii=False)[:300]}")
         if msgs and msgs[0].get("status") == "0":
             print(f"✅ SMS orderbekräftelse skickad till {to} (order {order.order_id})")
-            return True
+            return {"ok": True, "to": to, "error": "", "provider_status": "0"}
         err = (msgs[0].get("error-text") if msgs else None) or r.text
         print(f"⚠️  Vonage SMS FAILED: {err}")
         if "Bad Credentials" in str(err):
             print("   → Kolla VONAGE_API_KEY och VONAGE_API_SECRET i Railway Variables. Kopiera exakt från Vonage Dashboard.")
         elif "invalid" in str(err).lower() or "from" in str(err).lower():
             print("   → VONAGE_FROM_NUMBER måste vara ett nummer du äger i Vonage (t.ex. virtuellt nummer). Format: +46701234567")
-        return False
+        provider_status = msgs[0].get("status") if msgs else str(r.status_code)
+        return {"ok": False, "to": to, "error": str(err), "provider_status": provider_status}
     except Exception as e:
         print(f"⚠️  Vonage SMS error: {e}")
-        return False
+        return {"ok": False, "to": to, "error": str(e)}
 
-def _get_customer_phone_from_webhook(body: dict) -> Optional[str]:
+def _get_customer_phone_from_webhook(body: dict, params: Optional[dict] = None) -> Optional[str]:
     """Hämta kundens telefonnummer från Vapi webhook-payload.
-    Söker i: message.call.customer.number, body.phoneNumber, call.customer.number, m.fl."""
-    msg = body.get("message") or {}
-    call = msg.get("call") or body.get("call") or {}
-    customer = call.get("customer") or msg.get("customer") or body.get("customer") or {}
-    phone = (
-        customer.get("number") or customer.get("phone") or customer.get("phoneNumber")
-        or call.get("customerNumber") or call.get("phoneNumber") or call.get("from") or call.get("to")
-        or msg.get("customerNumber") or msg.get("phoneNumber")
-        or body.get("phoneNumber") or body.get("customerNumber")
+    Avsiktligt exkluderas generiska destination/to/phoneNumber-fält som ofta är restaurangens Vapi-nummer."""
+    if not isinstance(body, dict):
+        body = {}
+    if params is not None and not isinstance(params, dict):
+        params = {}
+    param_paths = (
+        ("customer_phone",),
+        ("customerPhone",),
+        ("customer_number",),
+        ("customerNumber",),
+        ("phone",),
+        ("phone_number",),
+        ("phoneNumber",),
     )
-    if phone:
-        phone = str(phone).strip()
-    print(f"DEBUG SMS: phone sökväg -> found={phone}")
+    body_paths = (
+        ("message", "call", "customer", "number"),
+        ("message", "call", "customer", "phone"),
+        ("message", "call", "customer", "phoneNumber"),
+        ("call", "customer", "number"),
+        ("call", "customer", "phone"),
+        ("call", "customer", "phoneNumber"),
+        ("message", "customer", "number"),
+        ("message", "customer", "phone"),
+        ("customer", "number"),
+        ("customer", "phone"),
+        ("message", "call", "customerNumber"),
+        ("message", "call", "callerNumber"),
+        ("message", "call", "from"),
+        ("call", "customerNumber"),
+        ("call", "callerNumber"),
+        ("call", "from"),
+        ("message", "customerNumber"),
+        ("message", "callerNumber"),
+        ("message", "from"),
+        ("customerNumber",),
+        ("callerNumber",),
+        ("from",),
+    )
+    phone = None
+    for source, paths_to_try in ((params or {}, param_paths), (body, body_paths)):
+        phone = _first_phone_from_paths(source, list(paths_to_try))
+        if phone:
+            break
+        phone = _recursive_customer_phone_search(source)
+        if phone:
+            break
+    print(f"DEBUG SMS: phone sökväg -> found={'YES' if phone else 'NO'}")
     return phone
 
 
@@ -928,7 +1058,42 @@ def _send_sms_failure_alert(rest_id: str, order_id: str, error_msg: str) -> None
     )
 
 
-def _run_sms_and_alert_on_failure(order_dict: dict, customer_phone: Optional[str], rest_id: str) -> None:
+def _update_order_sms_status(
+    db_order_id: Optional[str],
+    order_id: Optional[str],
+    status: str,
+    sms_to: str = "",
+    error_msg: str = "",
+) -> None:
+    """Spara SMS-status i Supabase om spårningskolumnerna finns. Fel får aldrig stoppa orderflödet."""
+    if not _supabase_client:
+        return
+    patch = {
+        "sms_status": status,
+        "sms_to": sms_to or "",
+        "sms_last_error": (error_msg or "")[:500],
+    }
+    if status == "sent":
+        patch["sms_sent_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    try:
+        q = _supabase_client.table("orders").update(patch)
+        if db_order_id:
+            q = q.eq("id", db_order_id)
+        elif order_id:
+            q = q.eq("order_id", order_id)
+        else:
+            return
+        q.execute()
+    except Exception as e:
+        print("⚠️  Supabase SMS status update skipped: %s" % e)
+
+
+def _run_sms_and_alert_on_failure(
+    order_dict: dict,
+    customer_phone: Optional[str],
+    rest_id: str,
+    db_order_id: Optional[str] = None,
+) -> None:
     """Körs i bakgrunden: skicka SMS; vid fel skicka alert till admin. Tar order som dict (order.model_dump())."""
     try:
         order = Order.model_validate(order_dict)
@@ -936,14 +1101,24 @@ def _run_sms_and_alert_on_failure(order_dict: dict, customer_phone: Optional[str
         print("⚠️  Background SMS: kunde inte bygga Order från dict: %s" % e)
         _send_sms_failure_alert(rest_id, order_dict.get("order_id", "?"), str(e))
         return
-    ok = send_sms_order_confirmation(order, customer_phone or "")
-    if not ok:
-        _send_sms_failure_alert(rest_id, order.order_id, "Vonage returnerade fel eller ingen telefon")
+    result = _send_sms_order_confirmation_result(order, customer_phone or "")
+    if result["ok"]:
+        _update_order_sms_status(db_order_id, order.order_id, "sent", result.get("to", ""), "")
+        return
+    error_msg = result.get("error") or "Vonage returnerade fel eller ingen telefon"
+    status = "missing_phone" if error_msg == "missing_or_invalid_customer_phone" else "failed"
+    _update_order_sms_status(db_order_id, order.order_id, status, result.get("to", ""), error_msg)
+    _send_sms_failure_alert(rest_id, order.order_id, error_msg)
 
 
-def send_customer_sms_now(order: Order, customer_phone: Optional[str], rest_id: str) -> None:
+def send_customer_sms_now(
+    order: Order,
+    customer_phone: Optional[str],
+    rest_id: str,
+    db_order_id: Optional[str] = None,
+) -> None:
     """Skicka SMS synkront (samma HTTP-request som ordern). Bakgrundstasker kan annars hinner inte köras klart."""
-    _run_sms_and_alert_on_failure(order.model_dump(), customer_phone, rest_id)
+    _run_sms_and_alert_on_failure(order.model_dump(), customer_phone, rest_id, db_order_id)
 
 
 def _token_bucket_allow(rest_id: str) -> bool:
@@ -1355,10 +1530,10 @@ async def place_order(request: Request):
                     return JSONResponse(content={"results": [{"error": "Restaurangen kunde inte hittas."}]}, status_code=200)
                 if call_id:
                     _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
-                customer_phone = _get_customer_phone_from_webhook(body)
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
                 for tool_call_id, params in calls:
+                    customer_phone = _get_customer_phone_from_webhook(body, params)
                     items_data = _parse_items_from_params(params, rest_id)
                     if not items_data:
                         results.append({
@@ -1383,7 +1558,7 @@ async def place_order(request: Request):
                         order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                         customer_name = params.get("customer_name") or params.get("customerName") or ""
                         raw_transcript = _get_raw_transcript_from_webhook(body)
-                        sb_ok = _insert_order_to_supabase(
+                        db_order_id = _insert_order_to_supabase(
                             order,
                             restaurant_id,
                             customer_name=customer_name,
@@ -1391,7 +1566,7 @@ async def place_order(request: Request):
                             raw_transcript=raw_transcript,
                             restaurant_uuid=restaurant_uuid,
                         )
-                        if not sb_ok:
+                        if not db_order_id:
                             print(
                                 "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
                                 % order.order_id
@@ -1407,8 +1582,9 @@ async def place_order(request: Request):
                             })
                         })
                         if customer_phone:
-                            send_customer_sms_now(order, customer_phone, rest_id)
+                            send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
                         else:
+                            _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
                             print("⚠️  Ingen kundtelefon i body – SMS till kund skickades inte")
                     except Exception as e:
                         print(f"❌ place_order exception: {e}")
@@ -1515,6 +1691,8 @@ async def health_check():
             "vapi_configured": bool(VAPI_API_KEY),
             "supabase_configured": bool(_supabase_client),
             "vonage_sms_configured": bool(VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_FROM_NUMBER),
+            "sms_tracking_enabled": True,
+            "vonage_request_encoding": "form_urlencoded",
         }
     })
 
@@ -1630,10 +1808,10 @@ async def vapi_webhook(request: Request):
             call_data = msg_struct.get("call") or {}
             cust_data = call_data.get("customer") or msg_struct.get("customer") or {}
             print(f"DEBUG SMS: message.call keys={list(call_data.keys())}, customer keys={list(cust_data.keys())}")
-            customer_phone = _get_customer_phone_from_webhook(body)
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
+                customer_phone = _get_customer_phone_from_webhook(body, params)
                 items_data = _parse_items_from_params(params, rest_id)
                 if not items_data:
                     results.append({
@@ -1658,7 +1836,7 @@ async def vapi_webhook(request: Request):
                     order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
                     customer_name = params.get("customer_name") or params.get("customerName") or ""
                     raw_transcript = _get_raw_transcript_from_webhook(body)
-                    sb_ok = _insert_order_to_supabase(
+                    db_order_id = _insert_order_to_supabase(
                         order,
                         restaurant_id,
                         customer_name=customer_name,
@@ -1666,7 +1844,7 @@ async def vapi_webhook(request: Request):
                         raw_transcript=raw_transcript,
                         restaurant_uuid=restaurant_uuid,
                     )
-                    if not sb_ok:
+                    if not db_order_id:
                         print(
                             "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
                             % order.order_id
@@ -1683,8 +1861,9 @@ async def vapi_webhook(request: Request):
                     })
                     print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
                     if customer_phone:
-                        send_customer_sms_now(order, customer_phone, rest_id)
+                        send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
                     else:
+                        _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
                         print("⚠️  Ingen kundtelefon i webhook – SMS till kund skickades inte")
                 except Exception as e:
                     print(f"❌ place_order error in webhook: {e}")
