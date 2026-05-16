@@ -1474,6 +1474,137 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
     return out
 
 
+def _looks_like_place_order_params(body: dict) -> bool:
+    """True när Vapi skickar function-tool payload direkt till endpointen utan message/tool-calls-envelope."""
+    if not isinstance(body, dict) or "message" in body:
+        return False
+    candidates = [body]
+    for key in ("parameters", "arguments", "order", "full_order"):
+        val = body.get(key)
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except json.JSONDecodeError:
+                val = None
+        if isinstance(val, dict):
+            candidates.append(val)
+    for candidate in candidates:
+        items = candidate.get("items")
+        if not items and isinstance(candidate.get("order"), dict):
+            items = candidate["order"].get("items")
+        if not items and isinstance(candidate.get("full_order"), dict):
+            items = candidate["full_order"].get("items")
+        if isinstance(items, list):
+            return True
+    return False
+
+
+def _params_from_direct_place_order_payload(body: dict) -> dict:
+    """Normalisera Vapi direct tool payload till samma params-format som tool-calls."""
+    if not isinstance(body, dict):
+        return {}
+    for key in ("parameters", "arguments"):
+        val = body.get(key)
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except json.JSONDecodeError:
+                val = {}
+        if isinstance(val, dict) and (
+            val.get("items")
+            or (isinstance(val.get("order"), dict) and val["order"].get("items"))
+            or (isinstance(val.get("full_order"), dict) and val["full_order"].get("items"))
+        ):
+            return val
+    return body
+
+
+def _response_for_direct_place_order_result(result: dict) -> JSONResponse:
+    """Vapi direct function tools läser response body som tool-resultat; håll formen enkel och JSON-baserad."""
+    raw = result.get("result")
+    if isinstance(raw, str):
+        try:
+            return JSONResponse(content=json.loads(raw))
+        except json.JSONDecodeError:
+            return JSONResponse(content={"success": False, "error": raw})
+    if isinstance(raw, dict):
+        return JSONResponse(content=raw)
+    return JSONResponse(content={"success": False, "error": "Okänt orderresultat"})
+
+
+def _handle_place_order_params(
+    params: dict,
+    body: dict,
+    request: Optional[Request],
+    rest_id: str,
+    restaurant_id: str,
+    restaurant_uuid: Optional[str],
+    tool_call_id: str = "direct-place-order",
+) -> dict:
+    """Gemensam orderhantering för Vapi tool-calls och direct function-tool payloads."""
+    customer_phone = _get_customer_phone_from_webhook(body, params)
+    items_data = _parse_items_from_params(params, rest_id)
+    if not items_data:
+        return {
+            "name": "place_order",
+            "toolCallId": tool_call_id,
+            "result": menu_match.place_order_fail_json("Inga artiklar i beställningen", []),
+        }
+    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
+    if not rk:
+        return {
+            "name": "place_order",
+            "toolCallId": tool_call_id,
+            "result": fail_json,
+        }
+    try:
+        items = [OrderItem(**it) for it in resolved_items]
+        order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
+        customer_name = params.get("customer_name") or params.get("customerName") or ""
+        raw_transcript = _get_raw_transcript_from_webhook(body)
+        db_order_id = _insert_order_to_supabase(
+            order,
+            restaurant_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            raw_transcript=raw_transcript,
+            restaurant_uuid=restaurant_uuid,
+        )
+        if not db_order_id:
+            print(
+                "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
+                % order.order_id
+            )
+        _circuit_breaker_record_success(rest_id)
+        result = {
+            "name": "place_order",
+            "toolCallId": tool_call_id,
+            "result": json.dumps({
+                "success": True,
+                "order_id": order.order_id,
+                "total_price": float(order.total_price),
+            }, ensure_ascii=False),
+        }
+        if customer_phone:
+            send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
+        else:
+            _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
+            print("⚠️  Ingen kundtelefon i place_order – SMS till kund skickades inte")
+        return result
+    except Exception as e:
+        print(f"❌ place_order exception: {e}")
+        if _circuit_breaker_record_failure(rest_id):
+            _send_circuit_breaker_alert(rest_id)
+        return {
+            "name": "place_order",
+            "toolCallId": tool_call_id,
+            "result": menu_match.place_order_fail_json(
+                "Beställningen kunde inte genomföras. Försök igen.",
+                [],
+            ),
+        }
+
+
 def _process_place_order(
     items: List[OrderItem],
     special_requests: Optional[str] = None,
@@ -1632,20 +1763,25 @@ async def place_order(request: Request):
                 raise HTTPException(status_code=400, detail="No place_order tool call found")
         
         # Direct format: {"items": [...], "special_requests": "..."}
-        # Samma meny-matchning som Vapi. Optional ?rest_id= (default Gislegrillen_01).
+        # Samma orderflöde som Vapi: menyvalidering, Supabase och SMS-status. Optional ?rest_id=.
         rest_direct = (request.query_params.get("rest_id") or "").strip() or "Gislegrillen_01"
-        req = PlaceOrderRequest(**body)
-        items_as_dicts = [it.model_dump() for it in req.items]
-        rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_as_dicts, rest_direct)
-        if not rk:
-            return JSONResponse(content=json.loads(fail_json))
-        items_direct = [OrderItem(**it) for it in resolved_items]
-        order = _process_place_order(items_direct, req.special_requests, rest_id=rest_direct)
-        return JSONResponse(content={
-            "success": True,
-            "message": "Order placed successfully",
-            "order": order.model_dump()
-        })
+        if not _circuit_breaker_allow(rest_direct):
+            return JSONResponse(content={"success": False, "error": "Temporärt fel. Försök igen om en minut."})
+        if not _token_bucket_allow(rest_direct):
+            return JSONResponse(content={"success": False, "error": "För många anrop. Vänta en stund."})
+        restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+        if restaurant_id is None and restaurant_uuid is None:
+            return JSONResponse(content={"success": False, "error": "Restaurangen kunde inte hittas."})
+        params = _params_from_direct_place_order_payload(body)
+        result = _handle_place_order_params(
+            params,
+            body,
+            request,
+            rest_direct,
+            restaurant_id,
+            restaurant_uuid,
+        )
+        return _response_for_direct_place_order_result(result)
         
     except HTTPException:
         raise
@@ -1804,6 +1940,28 @@ async def vapi_webhook(request: Request):
 
         print("\n" + "-"*50)
         print(f"📞 VAPI WEBHOOK: event_type={event_type}")
+
+        # Vapi function tools can POST the tool arguments directly to the server URL.
+        # Treat that as place_order instead of returning a generic success for an unknown event.
+        if _looks_like_place_order_params(body):
+            rest_id = _get_rest_id_from_request(request, body) or "Gislegrillen_01"
+            if not _circuit_breaker_allow(rest_id):
+                return JSONResponse(content={"success": False, "error": "Temporärt fel. Försök igen om en minut."})
+            if not _token_bucket_allow(rest_id):
+                return JSONResponse(content={"success": False, "error": "För många anrop. Vänta en stund."})
+            restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+            if restaurant_id is None and restaurant_uuid is None:
+                return JSONResponse(content={"success": False, "error": "Restaurangen kunde inte hittas."})
+            params = _params_from_direct_place_order_payload(body)
+            result = _handle_place_order_params(
+                params,
+                body,
+                request,
+                rest_id,
+                restaurant_id,
+                restaurant_uuid,
+            )
+            return _response_for_direct_place_order_result(result)
 
         # Handle end-of-call-report
         # OBS: Vi skippar order-skapande här för att undvika DUBBLA ordrar.
