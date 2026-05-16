@@ -67,6 +67,18 @@ class TestCustomerPhoneExtraction(unittest.TestCase):
         params = {"items": [{"id": 1, "quantity": 1}], "customer_phone": "070-765 43 21"}
         self.assertEqual(main._get_customer_phone_from_webhook(body, params), "+46707654321")
 
+    def test_direct_place_order_payload_is_detected(self):
+        body = {"items": [{"name": "Vesuvio", "quantity": 1}], "special_requests": ""}
+        self.assertTrue(main._looks_like_place_order_params(body))
+        self.assertEqual(main._params_from_direct_place_order_payload(body), body)
+
+    def test_dagens_is_not_a_menu_item(self):
+        body = {"items": [{"name": "dagens rätt", "quantity": 1}]}
+        items = main._parse_items_from_params(body, "Gislegrillen_01")
+        ok, _resolved, fail_json = main._resolve_items_with_menu_match(items, "Gislegrillen_01")
+        self.assertFalse(ok)
+        self.assertIn("dagens rätt", fail_json)
+
 
 if __name__ == "__main__":
     unittest.main()
