@@ -45,22 +45,27 @@ class TestCustomerPhoneExtraction(unittest.TestCase):
         }
         self.assertIsNone(main._get_customer_phone_from_webhook(body))
 
-    def test_does_not_use_restaurant_contact_number_as_customer(self):
+    def test_uses_customer_number_even_if_it_matches_old_hardcoded_value(self):
         body = {"message": {"call": {"customer": {"number": "+46760445700"}}}}
-        self.assertIsNone(main._get_customer_phone_from_webhook(body))
+        self.assertEqual(main._get_customer_phone_from_webhook(body), "+46760445700")
 
-    def test_sms_result_blocks_restaurant_contact_number(self):
-        order = main.Order(
-            order_id="ORD-TEST",
-            items=[],
-            special_requests=None,
-            total_price=0,
-            status="pending",
-            timestamp="2026-05-13 00:00:00",
-        )
-        result = main._send_sms_order_confirmation_result(order, "+46760445700")
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "blocked_business_or_provider_number")
+    def test_sms_blocks_explicitly_excluded_number(self):
+        original = main.RESTAURANT_CONTACT_NUMBER
+        main.RESTAURANT_CONTACT_NUMBER = "+46769439831"
+        try:
+            order = main.Order(
+                order_id="ORD-TEST",
+                items=[],
+                special_requests=None,
+                total_price=0,
+                status="pending",
+                timestamp="2026-05-13 00:00:00",
+            )
+            result = main._send_sms_order_confirmation_result(order, "+46769439831")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "blocked_business_or_provider_number")
+        finally:
+            main.RESTAURANT_CONTACT_NUMBER = original
 
     def test_extracts_phone_from_tool_params_when_vapi_sends_direct_args(self):
         body = {"message": {"call": {"to": "+46760445700"}}}
@@ -85,14 +90,14 @@ class TestCustomerPhoneExtraction(unittest.TestCase):
         finally:
             main._fetch_vapi_call_record = original_fetch
 
-    def test_resolve_customer_phone_blocks_restaurant_number_from_vapi_api(self):
+    def test_resolve_customer_phone_returns_default_caller_id(self):
         body = {"message": {"call": {"id": "call-blocked-1"}}}
         original_fetch = main._fetch_vapi_call_record
         try:
             main._fetch_vapi_call_record = lambda _cid: {
                 "customer": {"number": "+46760445700"},
             }
-            self.assertIsNone(main._resolve_customer_phone(body, {}))
+            self.assertEqual(main._resolve_customer_phone(body, {}), "+46760445700")
         finally:
             main._fetch_vapi_call_record = original_fetch
 

@@ -82,7 +82,11 @@ ADMIN_SECRET = _clean_env_value("ADMIN_SECRET")
 # Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
 # I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
 WEBHOOK_SHARED_SECRET = _clean_env_value("WEBHOOK_SHARED_SECRET")
-RESTAURANT_CONTACT_NUMBER = _clean_env_value("RESTAURANT_CONTACT_NUMBER", "+46760445700")
+# RESTAURANT_CONTACT_NUMBER: tom default. Sätt detta i Railway ENBART om
+# pizzerians kontaktlinje av misstag rapporteras som kundens nummer av telefonioperatören
+# (då — och bara då — ska SMS till det numret blockeras). Tidigare hardcoded
+# +46760445700 blockerade legitima uppringare.
+RESTAURANT_CONTACT_NUMBER = _clean_env_value("RESTAURANT_CONTACT_NUMBER", "")
 SMS_EXCLUDED_NUMBERS = _clean_env_value("SMS_EXCLUDED_NUMBERS")
 
 # Fas 2: Kryptering av tenant-nycklar (restaurant_secrets)
