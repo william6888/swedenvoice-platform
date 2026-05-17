@@ -1188,13 +1188,27 @@ def _commit_order_supabase_first(
 
 
 def _format_order_sms(order: Order) -> str:
-    """Formatera beställning till SMS-text enligt spec."""
+    """
+    Formatera beställning till SMS-text.
+
+    AI skickar special_requests antingen per rad (item.special_requests) eller som
+    en toppnivå-sträng (order.special_requests, t.ex. "Vesuvio: extra sas.").
+    Vi visar BÅDA så kunden alltid ser sina ändringar i SMS:et – samma info
+    som köket ser i KDS.
+    """
     lines = ["Hej! Detta är din orderbekräftelse från Gislegrillen.", ""]
+    per_item_seen: List[str] = []
     for item in order.items:
         part = f"{item.quantity}x {item.name}"
-        if item.special_requests and item.special_requests.strip():
-            part += f" {item.special_requests.strip()}"
+        sr = (getattr(item, "special_requests", None) or "").strip()
+        if sr:
+            part += f" ({sr})"
+            per_item_seen.append(sr)
         lines.append(part)
+    top_level = (getattr(order, "special_requests", None) or "").strip()
+    if top_level and top_level not in per_item_seen:
+        lines.append("")
+        lines.append(f"Önskemål: {top_level}")
     lines.extend(["", "Är din beställning felaktig? Ring oss: +46760445700"])
     return "\n".join(lines)
 
