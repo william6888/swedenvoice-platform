@@ -49,26 +49,40 @@ Copy and paste the ENTIRE contents of `system_prompt.md` into the system prompt 
 
 Du behöver en ElevenLabs API-nyckel (eller Play.ht/Cartesia) i Vapi – koppla under Assistant → Voice → Provider.
 
-## Step 3: Configure the Tool
+## Step 3: Configure the Tools (draft + place)
 
-Add a **Server Tool** (Function Calling):
+Lägg till **två** Server Tools. Klistra in hela `system_prompt.md` som system prompt (draft-flöde).
 
-### Tool Configuration
+**Server URL (Messaging):** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook`  
+**Valfritt:** Om varje tool har egen URL, använd `/draft_order` respektive `/place_order` istället.
 
-**Name:** `place_order`
+Sätt i Railway: `REQUIRE_DRAFT_TOKEN=true` (se `deploy_kit/railway_env.txt`).
 
-**URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook` (Server URL in Vapi Messaging)
+### Tool 1: `draft_order`
+
+**URL:** `https://DIN-RAILWAY-URL.up.railway.app/draft_order` (eller samma webhook som ovan)
 
 **Method:** POST
 
-**Description:** 
+**Description:**
 ```
-Place a customer order with items, quantities, and special requests. Call this when the customer has confirmed their order.
+Validate items against the menu and return a Swedish readback string plus draft_token. Call silently before reading the order aloud to the customer, or before place_order in step 4a. Never mention this tool to the customer.
 ```
 
-### Parameters Schema
+**Parameters:** samma schema som `place_order` nedan (items + special_requests).
 
-Paste this exact JSON schema:
+### Tool 2: `place_order`
+
+**URL:** `https://DIN-RAILWAY-URL.up.railway.app/place_order` (eller webhook)
+
+**Method:** POST
+
+**Description:**
+```
+Commit the order after customer confirmation (or immediately in step 4a). Include draft_token from the latest draft_order. Call once per call. Silent – do not speak tool output.
+```
+
+### Parameters Schema (båda verktygen)
 
 ```json
 {
@@ -98,7 +112,11 @@ Paste this exact JSON schema:
     },
     "special_requests": {
       "type": "string",
-      "description": "Any special requests from the customer (e.g., 'ingen lök', 'extra ost', 'starksås på sidan')"
+      "description": "Any special requests from the customer (e.g., 'ingen lök', 'extra ost')"
+    },
+    "draft_token": {
+      "type": "string",
+      "description": "Required for place_order: copy from the latest draft_order response"
     }
   },
   "required": ["items"]
@@ -107,9 +125,9 @@ Paste this exact JSON schema:
 
 ### Tool Execution
 
-- **When to call:** After customer confirms order
-- **Headers:** (leave empty or add custom headers if needed)
-- **Authentication:** None (or add API key if you implement it)
+- **draft_order:** Before readback (4b/6b) or silently before place_order (4a)
+- **place_order:** After "Stämmer beställningen?" = ja, or immediately in 4a
+- **Headers:** `X-Webhook-Secret` om `WEBHOOK_SHARED_SECRET` är satt i Railway
 
 ## Step 4: Phone Number Configuration
 

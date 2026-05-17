@@ -113,11 +113,10 @@ def verify_draft_token(
     return (True, payload, None)
 
 
-def format_canonical_readback(items: list, total_price: float, special_requests: str = "") -> str:
+def format_verbal_readback(items: list, special_requests: str = "") -> str:
     """
-    Bygg en svenskspråkig canonical readback-text som AI kan läsa upp för kunden.
-    Format: "1x Margherita 120 kr. 2x Cola 50 kr. Speciellt: extra ost. Totalt: 220 kr."
-    """
+    Text AI ska läsa upp för kunden – inga priser, inga id-nummer (matchar original-prompt).
+  """
     parts: list = []
     for it in items:
         try:
@@ -126,11 +125,23 @@ def format_canonical_readback(items: list, total_price: float, special_requests:
             qty = 1
         name = str(it.get("name") or "okänd").strip()
         sr = (it.get("special_requests") or it.get("notes") or "").strip()
-        line = f"{qty}x {name}"
+        if qty == 1:
+            line = f"En {name}"
+        else:
+            line = f"{qty} {name}"
         if sr:
-            line += f" ({sr})"
+            line += f" med {sr}"
         parts.append(line)
-    if special_requests:
+    if special_requests and special_requests.strip():
         parts.append(f"Speciellt: {special_requests.strip()}")
-    parts.append(f"Totalt: {round(float(total_price), 2)} kr")
-    return ". ".join(parts) + "."
+    return ", ".join(parts) + "." if parts else "Ingen beställning."
+
+
+def format_canonical_readback(items: list, total_price: float, special_requests: str = "") -> str:
+    """
+    Full readback inkl. total (logg/internt). För kundröst: använd format_verbal_readback.
+    """
+    verbal = format_verbal_readback(items, special_requests)
+    if verbal.endswith("."):
+        verbal = verbal[:-1]
+    return f"{verbal}. Totalt: {round(float(total_price), 2)} kr."
