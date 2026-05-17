@@ -115,10 +115,9 @@ ORDER_REQUIRE_DB_COMMIT = (os.getenv("ORDER_REQUIRE_DB_COMMIT", "true") or "true
 DASHBOARD_FROM_DB = (os.getenv("DASHBOARD_FROM_DB", "true") or "true").strip().lower() == "true"
 # DEFAULT_DASHBOARD_REST_ID styr vilken tenant lokala /dashboard visar i utveckling.
 DEFAULT_DASHBOARD_REST_ID = _clean_env_value("DEFAULT_DASHBOARD_REST_ID", "Gislegrillen_01")
-# REQUIRE_DRAFT_TOKEN=true tvingar AI att gå via /draft_order innan /place_order.
-# Default FALSE för bakåtkompatibilitet med befintlig Vapi-prompt: aktivera (env=true)
-# först när din Vapi-assistant uppdaterats till draft-flödet i system_prompt.md.
-# Ordergaranti-modulen är aktiv ändå (idempotency, validation, Supabase-commit).
+# REQUIRE_DRAFT_TOKEN=true kräver signerad payload vid commit. Saknas token
+# auto-utfärdas den server-side (AI behöver inte alltid anropa draft_order).
+# Default false = bakåtkompatibelt; true = extra hash-skydd utan hårda Vapi-fel.
 REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "false") or "false").strip().lower() == "true"
 # OPS_AGENT_ENABLED=true startar ops-worker som in-process bakgrundstask.
 # Detta ger autonom drift utan extern cron (Railway/GitHub Actions). Default ON.
@@ -719,6 +718,35 @@ def _build_draft_for_items(
     }
 
 
+def _auto_issue_draft_token(
+    *,
+    items: List[OrderItem],
+    raw_items: List[dict],
+    restaurant_uuid: Optional[str],
+    special_requests: Optional[str],
+    vapi_call_id: Optional[str],
+) -> str:
+    """
+    Utfärda draft_token server-side när AI glömmer draft_order eller token gått ut.
+    Cachar per samtal så place_order alltid kan verifiera hash utan Vapi-fel.
+    """
+    draft = _build_draft_for_items(
+        items=items,
+        raw_items=raw_items,
+        restaurant_uuid=restaurant_uuid,
+        special_requests=special_requests,
+    )
+    if vapi_call_id:
+        _cache_draft_for_call(
+            vapi_call_id,
+            draft["draft_token"],
+            draft["payload_hash"],
+            draft["readback"],
+            draft.get("expires_at"),
+        )
+    return draft["draft_token"]
+
+
 def _commit_order_supabase_first(
     *,
     items: List[OrderItem],
@@ -792,40 +820,56 @@ def _commit_order_supabase_first(
             effective_draft_token = cached_draft.get("draft_token")
             print(f"draft: återanvänder cached draft_token för call_id={vapi_call_id}")
 
-    # 2a. Validera draft-token om den krävs eller skickats. Detta ser till att
-    #     AI inte kan committa en order som inte överensstämmer med canonical
-    #     readback som kunden bekräftat.
-    if require_draft_token and not effective_draft_token:
+    # Saknas token: utfärda automatiskt (ingen DRAFT_REQUIRED som stoppar order/SMS).
+    if not effective_draft_token and (require_draft_token or vapi_call_id):
+        effective_draft_token = _auto_issue_draft_token(
+            items=items,
+            raw_items=raw_items,
+            restaurant_uuid=restaurant_uuid,
+            special_requests=special_requests,
+            vapi_call_id=vapi_call_id,
+        )
         order_service.write_order_event(
             _supabase_client,
-            event_type="draft_required",
+            event_type="draft_auto_issued",
             restaurant_uuid=restaurant_uuid,
             restaurant_id=restaurant_id,
             order_id=None,
             correlation_id=correlation_id,
-            payload={"payload_hash": payload_hash},
+            payload={"payload_hash": payload_hash, "vapi_call_id": vapi_call_id},
         )
-        return {
-            "success": False,
-            "order_id": None,
-            "db_order_id": None,
-            "total_price": None,
-            "needs_human_review": False,
-            "idempotent_replay": False,
-            "error_code": "DRAFT_REQUIRED",
-            "error_message": (
-                "Anropa draft_order först med samma artiklar, läs upp readback för kunden, "
-                "vänta på ja till 'Stämmer beställningen?' och anropa sedan place_order."
-            ),
-            "idempotency_key": idempotency_key,
-        }
+        print(f"draft: auto-utfärdad token för call_id={vapi_call_id or 'n/a'}")
 
+    # 2a. Verifiera draft-token när den finns eller krävs (hash = samma menylista).
     if effective_draft_token or require_draft_token:
         ok, token_payload, err_code = confirmation.verify_draft_token(
             effective_draft_token or "",
             expected_restaurant_uuid=restaurant_uuid,
             expected_payload_hash=payload_hash,
         )
+        if not ok and err_code in ("HASH_MISMATCH", "EXPIRED", "INVALID_SIGNATURE"):
+            # Kunden/AI ändrade lista eller token gick ut – förnya en gång, fortsätt.
+            effective_draft_token = _auto_issue_draft_token(
+                items=items,
+                raw_items=raw_items,
+                restaurant_uuid=restaurant_uuid,
+                special_requests=special_requests,
+                vapi_call_id=vapi_call_id,
+            )
+            order_service.write_order_event(
+                _supabase_client,
+                event_type="draft_token_refreshed",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=None,
+                correlation_id=correlation_id,
+                payload={"previous_error": err_code, "payload_hash": payload_hash},
+            )
+            ok, token_payload, err_code = confirmation.verify_draft_token(
+                effective_draft_token,
+                expected_restaurant_uuid=restaurant_uuid,
+                expected_payload_hash=payload_hash,
+            )
         if not ok:
             order_service.write_order_event(
                 _supabase_client,
@@ -844,11 +888,7 @@ def _commit_order_supabase_first(
                 "needs_human_review": False,
                 "idempotent_replay": False,
                 "error_code": "DRAFT_TOKEN_INVALID",
-                "error_message": (
-                    "Beställningen behöver bekräftas igen. Läs upp den för kunden och be om ja."
-                    if err_code != "EXPIRED"
-                    else "Bekräftelsen har gått ut. Be kunden bekräfta beställningen igen."
-                ),
+                "error_message": "Beställningen kunde inte bekräftas. Försök läsa upp ordern igen.",
                 "idempotency_key": idempotency_key,
                 "draft_error_code": err_code,
             }
@@ -2524,10 +2564,10 @@ def _handle_draft_order_params(
             draft.get("expires_at"),
         )
 
+    # Skicka bara readback till AI – draft_token finns i server-cache (läses inte upp av misstag).
     result_payload: Dict[str, Any] = {
         "success": True,
         "readback": draft["readback"],
-        "draft_token": draft["draft_token"],
         "needs_human_review": draft["needs_human_review"],
     }
     if draft["needs_human_review"]:

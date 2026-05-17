@@ -74,11 +74,11 @@ def test_draft_order_params_returns_readback(monkeypatch):
     payload = json.loads(result["result"])
     assert payload["success"] is True
     assert "Capricciosa" in payload["readback"]
-    assert "draft_token" in payload
+    assert "draft_token" not in payload
     assert "kr" not in payload["readback"]
     cached = M._get_cached_draft_for_call("call-draft-1")
     assert cached is not None
-    assert cached["draft_token"] == payload["draft_token"]
+    assert cached.get("draft_token")
 
 
 def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_main):
@@ -110,7 +110,8 @@ def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_m
     assert place_payload.get("order_id")
 
 
-def test_place_order_requires_draft_when_no_cache(monkeypatch, _reset_main):
+def test_place_order_auto_drafts_when_no_prior_draft(monkeypatch, _reset_main):
+    """AI skippar draft_order – order ska ändå gå igenom (auto-draft)."""
     monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", True)
     body = {"message": {"call": {"id": "call-nodraft"}}}
     place_res = M._handle_place_order_params(
@@ -123,13 +124,14 @@ def test_place_order_requires_draft_when_no_cache(monkeypatch, _reset_main):
         tool_call_id="tool-only",
     )
     place_payload = json.loads(place_res["result"])
-    assert place_payload.get("success") is False
+    assert place_payload.get("success") is True
+    assert place_payload.get("order_id")
 
 
-def test_draft_then_place_with_explicit_token(monkeypatch, _reset_main):
+def test_draft_then_place_clears_cache(monkeypatch, _reset_main):
     monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", True)
     body = {"message": {"call": {"id": "call-full"}}}
-    draft_res = M._handle_draft_order_params(
+    M._handle_draft_order_params(
         _items_payload(),
         body,
         None,
@@ -137,10 +139,9 @@ def test_draft_then_place_with_explicit_token(monkeypatch, _reset_main):
         "Gislegrillen_01",
         "u-rest-1",
     )
-    token = json.loads(draft_res["result"])["draft_token"]
-    params = {**_items_payload(), "draft_token": token}
+    assert M._get_cached_draft_for_call("call-full") is not None
     place_res = M._handle_place_order_params(
-        params,
+        _items_payload(),
         body,
         None,
         "Gislegrillen_01",
