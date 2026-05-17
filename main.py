@@ -112,8 +112,10 @@ DASHBOARD_FROM_DB = (os.getenv("DASHBOARD_FROM_DB", "true") or "true").strip().l
 # DEFAULT_DASHBOARD_REST_ID styr vilken tenant lokala /dashboard visar i utveckling.
 DEFAULT_DASHBOARD_REST_ID = _clean_env_value("DEFAULT_DASHBOARD_REST_ID", "Gislegrillen_01")
 # REQUIRE_DRAFT_TOKEN=true tvingar AI att gå via /draft_order innan /place_order.
-# Default true: Vapi-flödet ska alltid bekräfta canonical via draft_order innan commit.
-REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "true") or "true").strip().lower() == "true"
+# Default FALSE för bakåtkompatibilitet med befintlig Vapi-prompt: aktivera (env=true)
+# först när din Vapi-assistant uppdaterats till draft-flödet i system_prompt.md.
+# Ordergaranti-modulen är aktiv ändå (idempotency, validation, Supabase-commit).
+REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "false") or "false").strip().lower() == "true"
 # OPS_AGENT_ENABLED=true startar ops-worker som in-process bakgrundstask.
 # Detta ger autonom drift utan extern cron (Railway/GitHub Actions). Default ON.
 OPS_AGENT_ENABLED = (os.getenv("OPS_AGENT_ENABLED", "true") or "true").strip().lower() == "true"
