@@ -77,6 +77,43 @@ def test_five_retries_create_one_order(_reset_main):
     assert len(replays) == 4
 
 
+def test_two_place_orders_same_call_create_one_order(_reset_main):
+    """Skydd: AI ringer place_order två gånger i samma samtal med olika
+    tool_call_id (eller t.o.m. olika items) → bara en order, ett SMS."""
+    db = _reset_main
+    first = _commit(db, vapi_tool_call_id="tool-A")
+    assert first["success"] and not first.get("idempotent_replay")
+
+    second_items = list(_items()) + [M.OrderItem(id=3, name="Margherita", quantity=1, price=99.0)]
+    second_resolved = list(_resolved_raw()) + [
+        {"id": 3, "name": "Margherita", "quantity": 1, "price": 99.0, "matchType": "exact"}
+    ]
+    second = _commit(
+        db,
+        items=second_items,
+        raw_items=second_resolved,
+        vapi_tool_call_id="tool-B",
+        special_requests="",
+    )
+    assert second["success"]
+    assert second["order_id"] == first["order_id"]
+    assert second["idempotent_replay"] is True
+    assert len(db.get_orders()) == 1
+
+    events = [e for e in db.get_events() if e.get("event_type") == "duplicate_place_order_in_call"]
+    assert len(events) == 1
+    assert events[0].get("payload", {}).get("vapi_call_id") == "call-1"
+
+
+def test_two_place_orders_different_calls_create_two_orders(_reset_main):
+    db = _reset_main
+    first = _commit(db, vapi_call_id="call-A", vapi_tool_call_id="tool-A")
+    second = _commit(db, vapi_call_id="call-B", vapi_tool_call_id="tool-B")
+    assert first["success"] and second["success"]
+    assert first["order_id"] != second["order_id"]
+    assert len(db.get_orders()) == 2
+
+
 def test_supabase_failure_returns_failure_and_no_order(_reset_main):
     db = _reset_main
     db.fail_next_on_table["orders"] = True

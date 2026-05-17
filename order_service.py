@@ -80,6 +80,39 @@ def lookup_existing_idempotency(
         return (None, str(e))
 
 
+def lookup_completed_for_call(
+    supabase_client: Any,
+    vapi_call_id: Optional[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Hitta senaste completed idempotency-rad för ett Vapi-samtal.
+
+    Skydd mot dubbel-place_order per samtal: om AI ringer place_order två gånger
+    (olika tool_call_id) under samma samtal vill vi inte committa två gånger.
+    Returnera den första completed-raden så vi kan replay:a den.
+    """
+    if not supabase_client or not vapi_call_id:
+        return (None, None)
+    try:
+        resp = (
+            supabase_client.table("idempotency_records")
+            .select("*")
+            .eq("vapi_call_id", vapi_call_id)
+            .eq("status", "completed")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        data = getattr(resp, "data", None) or []
+        if data:
+            return (data[0], None)
+        return (None, None)
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return (None, "missing_table")
+        return (None, str(e))
+
+
 def reserve_idempotency(
     supabase_client: Any,
     idempotency_key: str,
