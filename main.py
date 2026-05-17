@@ -145,7 +145,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/vapi/webhook", "/vapi-webhook"})
+_VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
 
 
 @app.middleware("http")
@@ -712,9 +712,8 @@ def _build_draft_for_items(
         "expires_at": token_payload.get("expires_at"),
         "needs_human_review": needs_review,
         "low_confidence_rows": low_confidence_rows,
-        "readback": confirmation.format_canonical_readback(
+        "readback": confirmation.format_verbal_readback(
             [ci.to_dict() for ci in canonical_items],
-            total_price,
             (special_requests or "").strip(),
         ),
     }
@@ -786,12 +785,44 @@ def _commit_order_supabase_first(
         payload_hash=payload_hash,
     )
 
+    effective_draft_token = (draft_token or "").strip() or None
+    if not effective_draft_token and vapi_call_id:
+        cached_draft = _get_cached_draft_for_call(vapi_call_id)
+        if cached_draft and cached_draft.get("payload_hash") == payload_hash:
+            effective_draft_token = cached_draft.get("draft_token")
+            print(f"draft: återanvänder cached draft_token för call_id={vapi_call_id}")
+
     # 2a. Validera draft-token om den krävs eller skickats. Detta ser till att
     #     AI inte kan committa en order som inte överensstämmer med canonical
     #     readback som kunden bekräftat.
-    if draft_token or require_draft_token:
+    if require_draft_token and not effective_draft_token:
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="draft_required",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=None,
+            correlation_id=correlation_id,
+            payload={"payload_hash": payload_hash},
+        )
+        return {
+            "success": False,
+            "order_id": None,
+            "db_order_id": None,
+            "total_price": None,
+            "needs_human_review": False,
+            "idempotent_replay": False,
+            "error_code": "DRAFT_REQUIRED",
+            "error_message": (
+                "Anropa draft_order först med samma artiklar, läs upp readback för kunden, "
+                "vänta på ja till 'Stämmer beställningen?' och anropa sedan place_order."
+            ),
+            "idempotency_key": idempotency_key,
+        }
+
+    if effective_draft_token or require_draft_token:
         ok, token_payload, err_code = confirmation.verify_draft_token(
-            draft_token or "",
+            effective_draft_token or "",
             expected_restaurant_uuid=restaurant_uuid,
             expected_payload_hash=payload_hash,
         )
@@ -1440,6 +1471,9 @@ _CALL_CACHE_MAX_SIZE = 2000
 
 # Cache: call_id -> kundens normaliserade mobil (för SMS) när vi hittat den i webhook eller Vapi API.
 _CALL_CUSTOMER_PHONE_CACHE: Dict[str, dict] = {}
+
+# Cache: call_id -> senaste draft (token + hash) så place_order fungerar även om AI glömmer skicka draft_token.
+_CALL_DRAFT_CACHE: Dict[str, dict] = {}
 
 # ==================== FAS 1: SAFETY NET ====================
 # Aktiva-tenant-set: uppdateras var 1:e minut från DB. Vid cache-användning validerar vi mot denna.
@@ -2230,47 +2264,94 @@ async def get_orders(rest_id: Optional[str] = None):
     orders = load_orders()
     return JSONResponse(content=orders)
 
-def _extract_vapi_tool_calls(msg: dict) -> list:
+def _cache_draft_for_call(
+    call_id: str,
+    draft_token: str,
+    payload_hash: str,
+    readback: str,
+    expires_at: Optional[Any] = None,
+) -> None:
+    """Spara senaste draft för samtalet (backup om AI inte skickar draft_token till place_order)."""
+    if not call_id or not draft_token:
+        return
+    exp_ts = time.time() + confirmation.DRAFT_TTL_SECONDS
+    if expires_at is not None:
+        try:
+            exp_ts = min(exp_ts, float(expires_at))
+        except (TypeError, ValueError):
+            pass
+    _CALL_DRAFT_CACHE[str(call_id)] = {
+        "draft_token": draft_token,
+        "payload_hash": payload_hash,
+        "readback": readback,
+        "expires_at": exp_ts,
+        "ts": time.time(),
+    }
+    if len(_CALL_DRAFT_CACHE) > _CALL_CACHE_MAX_SIZE:
+        now = time.time()
+        expired = [k for k, v in _CALL_DRAFT_CACHE.items() if (now - v.get("ts", 0)) > _CALL_CACHE_TTL_SEC]
+        for k in expired:
+            del _CALL_DRAFT_CACHE[k]
+
+
+def _get_cached_draft_for_call(call_id: str) -> Optional[dict]:
+    entry = _CALL_DRAFT_CACHE.get(str(call_id))
+    if not entry:
+        return None
+    if time.time() > float(entry.get("expires_at") or 0):
+        del _CALL_DRAFT_CACHE[str(call_id)]
+        return None
+    return entry
+
+
+def _clear_draft_cache_for_call(call_id: Optional[str]) -> None:
+    if call_id:
+        _CALL_DRAFT_CACHE.pop(str(call_id), None)
+
+
+def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
     """
-    Extrahera place_order-anrop från Vapi-format.
+    Extrahera draft_order och place_order från Vapi-format.
     Stödjer: toolCalls, toolCallList, toolWithToolCallList.
     DEDUPLICERAR – Vapi skickar ofta samma anrop i både toolCalls OCH toolCallList.
-    Returnerar lista med (tool_call_id, params_dict).
+    Returnerar lista med (tool_call_id, tool_name, params_dict).
     """
     seen_ids = set()
-    out = []
-    def _add_from_tc(tc):
+    out: List[Tuple[str, str, dict]] = []
+
+    def _items_in_args(args: dict) -> bool:
+        if not isinstance(args, dict):
+            return False
+        items = args.get("items") or args.get("order", {}).get("items") or args.get("full_order", {}).get("items")
+        return isinstance(items, list) and len(items) > 0
+
+    def _add_from_tc(tc: dict) -> None:
         cid = tc.get("id", "unknown")
         if cid in seen_ids:
             return
         fn = tc.get("function") or tc
-        name = fn.get("name") or tc.get("name")
+        name = (fn.get("name") or tc.get("name") or "").strip()
         args = fn.get("arguments") or fn.get("parameters") or tc.get("arguments") or {}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
-        # Acceptera place_order antingen med explicit name ELLER om params innehåller items (Vapi toolCallList kan sakna name)
-        is_place_order = name == "place_order"
-        if not is_place_order and isinstance(args, dict):
-            items = args.get("items") or args.get("order", {}).get("items") or args.get("full_order", {}).get("items")
-            if isinstance(items, list) and len(items) > 0:
-                is_place_order = True
-        if not is_place_order:
+        tool_name = name
+        if tool_name not in ("place_order", "draft_order") and _items_in_args(args):
+            tool_name = "place_order"
+        if tool_name not in ("place_order", "draft_order"):
             return
         seen_ids.add(cid)
-        out.append((cid, args))
+        out.append((cid, tool_name, args))
 
-    # Vapi skickar toolCalls (id, type, function.name, function.arguments)
     for tc in msg.get("toolCalls", []):
         _add_from_tc(tc)
-    # toolCallList (nytt 2025)
     for tc in msg.get("toolCallList", []):
         _add_from_tc(tc)
-    # Gammalt: toolWithToolCallList
     for t in msg.get("toolWithToolCallList", []):
-        if t.get("name") != "place_order":
+        tname = (t.get("name") or "").strip()
+        if tname not in ("place_order", "draft_order"):
             continue
         tc = t.get("toolCall", {})
         cid = tc.get("id", "unknown")
@@ -2283,8 +2364,39 @@ def _extract_vapi_tool_calls(msg: dict) -> list:
                 params = json.loads(params)
             except json.JSONDecodeError:
                 params = {}
-        out.append((cid, params))
+        out.append((cid, tname, params))
     return out
+
+
+def _dispatch_vapi_tool_call(
+    tool_name: str,
+    params: dict,
+    body: dict,
+    request: Request,
+    rest_id: str,
+    restaurant_id: str,
+    restaurant_uuid: Optional[str],
+    tool_call_id: str,
+) -> dict:
+    if tool_name == "draft_order":
+        return _handle_draft_order_params(
+            params,
+            body,
+            request,
+            rest_id,
+            restaurant_id,
+            restaurant_uuid,
+            tool_call_id=tool_call_id,
+        )
+    return _handle_place_order_params(
+        params,
+        body,
+        request,
+        rest_id,
+        restaurant_id,
+        restaurant_uuid,
+        tool_call_id=tool_call_id,
+    )
 
 
 def _looks_like_place_order_params(body: dict) -> bool:
@@ -2343,6 +2455,90 @@ def _response_for_direct_place_order_result(result: dict) -> JSONResponse:
     if isinstance(raw, dict):
         return JSONResponse(content=raw)
     return JSONResponse(content={"success": False, "error": "Okänt orderresultat"})
+
+
+def _handle_draft_order_params(
+    params: dict,
+    body: dict,
+    request: Optional[Request],
+    rest_id: str,
+    restaurant_id: str,
+    restaurant_uuid: Optional[str],
+    tool_call_id: str = "direct-draft-order",
+) -> dict:
+    """
+    Bygg canonical draft + readback utan commit. Cachar draft_token per vapi_call_id.
+    """
+    items_data = _parse_items_from_params(params, rest_id)
+    try:
+        order_integrity.validate_raw_items(items_data)
+    except order_integrity.ValidationError as ve:
+        return {
+            "name": "draft_order",
+            "toolCallId": tool_call_id,
+            "result": menu_match.place_order_fail_json(ve.message, []),
+        }
+
+    paused, paused_reason = ops_agent.is_intake_paused(_supabase_client, restaurant_uuid)
+    if paused:
+        return {
+            "name": "draft_order",
+            "toolCallId": tool_call_id,
+            "result": menu_match.place_order_fail_json(
+                "Beställningar kan inte tas emot just nu. Försök igen lite senare.",
+                [],
+            ),
+        }
+
+    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
+    if not rk:
+        return {
+            "name": "draft_order",
+            "toolCallId": tool_call_id,
+            "result": fail_json,
+        }
+
+    items = []
+    for it in resolved_items:
+        items.append(OrderItem(
+            id=it["id"],
+            name=it["name"],
+            quantity=it.get("quantity") or 1,
+            price=it.get("price"),
+            special_requests=it.get("special_requests"),
+        ))
+    special_requests = params.get("special_requests") or params.get("specialRequests") or ""
+    draft = _build_draft_for_items(
+        items=items,
+        raw_items=resolved_items,
+        restaurant_uuid=restaurant_uuid,
+        special_requests=special_requests,
+    )
+    vapi_call_id = _get_call_id_from_webhook(body)
+    if vapi_call_id:
+        _cache_draft_for_call(
+            vapi_call_id,
+            draft["draft_token"],
+            draft["payload_hash"],
+            draft["readback"],
+            draft.get("expires_at"),
+        )
+
+    result_payload: Dict[str, Any] = {
+        "success": True,
+        "readback": draft["readback"],
+        "draft_token": draft["draft_token"],
+        "needs_human_review": draft["needs_human_review"],
+    }
+    if draft["needs_human_review"]:
+        result_payload["warning"] = (
+            "Någon rad har osäker menymatchning – fortsätt samtalet, personal granskar ordern."
+        )
+    return {
+        "name": "draft_order",
+        "toolCallId": tool_call_id,
+        "result": json.dumps(result_payload, ensure_ascii=False),
+    }
 
 
 def _handle_place_order_params(
@@ -2473,6 +2669,8 @@ def _handle_place_order_params(
         total_price = commit["total_price"]
         needs_review = bool(commit.get("needs_human_review"))
         idempotent_replay = bool(commit.get("idempotent_replay"))
+        if vapi_call_id:
+            _clear_draft_cache_for_call(vapi_call_id)
         # Bygg minimal "order"-objekt för SMS-flödet (vi har redan committed).
         sms_payload_order = Order(
             order_id=order_id,
@@ -2601,23 +2799,47 @@ def _process_place_order(
 @app.post("/draft_order")
 async def draft_order(request: Request):
     """
-    Returnera canonical readback för en beställning UTAN att committa något.
-
-    AI-flödet:
-      1. Vapi anropar /draft_order med items + special_requests.
-      2. Backend kör menymatchning, validering och bygger canonical payload.
-      3. Backend signerar en draft_token (HMAC) med payload_hash + restaurant_uuid.
-      4. AI läser upp canonical_items + total för kunden och frågar om bekräftelse.
-      5. Vid ja: AI anropar /place_order med draft_token. Backend verifierar att
-         items fortfarande hashar till samma värde innan commit.
-
-    Detta hindrar AI från att lova pickup-tid eller bekräfta beställning innan
-    backend faktiskt godkänt och committat ordern.
+    Returnera verbal readback + draft_token UTAN commit.
+    Stödjer Vapi tool-calls (message.toolCallList) och direkt JSON {items: [...]}.
     """
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(content={"success": False, "error": "Ogiltig JSON-body."}, status_code=400)
+
+    if "message" in body and isinstance(body.get("message"), dict):
+        msg = body["message"]
+        has_tools = msg.get("toolCalls") or msg.get("toolCallList") or msg.get("toolWithToolCallList")
+        if (msg.get("type") == "tool-calls" or has_tools) and has_tools:
+            rest_id = _get_rest_id_from_request(request, body) or DEFAULT_DASHBOARD_REST_ID
+            if not _circuit_breaker_allow(rest_id):
+                return JSONResponse(content={"results": [{"error": "Temporärt fel."}]})
+            if not _token_bucket_allow(rest_id):
+                return JSONResponse(content={"results": [{"error": "För många anrop."}]})
+            restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+            if restaurant_id is None and restaurant_uuid is None:
+                return JSONResponse(content={"results": [{"error": "Restaurangen kunde inte hittas."}]})
+            call_id = _get_call_id_from_webhook(body)
+            if call_id:
+                _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
+            results = []
+            for tool_call_id, tool_name, params in _extract_vapi_tool_calls(msg):
+                if tool_name != "draft_order":
+                    continue
+                results.append(
+                    _handle_draft_order_params(
+                        params,
+                        body,
+                        request,
+                        rest_id,
+                        restaurant_id,
+                        restaurant_uuid,
+                        tool_call_id=tool_call_id,
+                    )
+                )
+            if results:
+                return JSONResponse(content={"results": results})
+            raise HTTPException(status_code=400, detail="No draft_order tool call found")
 
     rest_id = (
         (request.query_params.get("rest_id") or "").strip()
@@ -2632,59 +2854,16 @@ async def draft_order(request: Request):
     if restaurant_id is None and restaurant_uuid is None:
         return JSONResponse(content={"success": False, "error": "Restaurangen kunde inte hittas."})
 
-    paused, reason = ops_agent.is_intake_paused(_supabase_client, restaurant_uuid)
-    if paused:
-        return JSONResponse(content={
-            "success": False,
-            "error": "Beställningar pausade just nu. Försök igen senare.",
-            "reason": reason,
-        })
-
-    items_data = _parse_items_from_params(body, rest_id)
-    try:
-        order_integrity.validate_raw_items(items_data)
-    except order_integrity.ValidationError as ve:
-        return JSONResponse(content={
-            "success": False,
-            "error": ve.message,
-            "error_code": ve.error_code,
-            "details": ve.details,
-        })
-
-    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
-    if not rk:
-        try:
-            payload = json.loads(fail_json)
-        except Exception:
-            payload = {"success": False, "error": "Menymatchning misslyckades."}
-        return JSONResponse(content=payload)
-
-    items = []
-    for it in resolved_items:
-        items.append(OrderItem(
-            id=it["id"],
-            name=it["name"],
-            quantity=it.get("quantity") or 1,
-            price=it.get("price"),
-            special_requests=it.get("special_requests"),
-        ))
-    draft = _build_draft_for_items(
-        items=items,
-        raw_items=resolved_items,
-        restaurant_uuid=restaurant_uuid,
-        special_requests=body.get("special_requests") if isinstance(body, dict) else None,
+    params = _params_from_direct_place_order_payload(body)
+    result = _handle_draft_order_params(
+        params,
+        body,
+        request,
+        rest_id,
+        restaurant_id,
+        restaurant_uuid,
     )
-    return JSONResponse(content={
-        "success": True,
-        "canonical_items": draft["canonical_items"],
-        "total_price": draft["total_price"],
-        "payload_hash": draft["payload_hash"],
-        "draft_token": draft["draft_token"],
-        "expires_at": draft["expires_at"],
-        "needs_human_review": draft["needs_human_review"],
-        "low_confidence_rows": draft["low_confidence_rows"],
-        "readback": draft["readback"],
-    })
+    return _response_for_direct_place_order_result(result)
 
 
 @app.post("/place_order")
@@ -2730,7 +2909,9 @@ async def place_order(request: Request):
                     _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
-                for tool_call_id, params in calls:
+                for tool_call_id, tool_name, params in calls:
+                    if tool_name != "place_order":
+                        continue
                     results.append(
                         _handle_place_order_params(
                             params,
@@ -3087,16 +3268,17 @@ async def vapi_webhook(request: Request):
             print(f"DEBUG SMS: message.call keys={list(call_data.keys())}, customer keys={list(cust_data.keys())}")
             calls = _extract_vapi_tool_calls(msg)
             results = []
-            for tool_call_id, params in calls:
+            for tool_call_id, tool_name, params in calls:
                 results.append(
-                    _handle_place_order_params(
+                    _dispatch_vapi_tool_call(
+                        tool_name,
                         params,
                         body,
                         request,
                         rest_id,
                         restaurant_id,
                         restaurant_uuid,
-                        tool_call_id=tool_call_id,
+                        tool_call_id,
                     )
                 )
             if results:

@@ -93,6 +93,16 @@ def test_canonical_readback_format():
         240.0,
         special_requests="extra ost",
     )
-    assert "2x Capri" in text
+    assert "2 Capri" in text
     assert "Speciellt: extra ost" in text
     assert "Totalt: 240" in text
+
+
+def test_verbal_readback_no_prices():
+    text = confirmation.format_verbal_readback(
+        [{"id": 1, "name": "Capri", "quantity": 2}],
+        special_requests="extra ost",
+    )
+    assert "2 Capri" in text
+    assert "kr" not in text
+    assert "Speciellt: extra ost" in text
