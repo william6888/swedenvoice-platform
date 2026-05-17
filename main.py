@@ -822,7 +822,7 @@ def _commit_order_supabase_first(
                 "draft_error_code": err_code,
             }
 
-    # 2. Idempotency lookup.
+    # 2. Idempotency lookup (samma payload + samma tool_call_id).
     existing, lookup_err = order_service.lookup_existing_idempotency(_supabase_client, idempotency_key)
     if existing and (existing.get("status") == "completed"):
         cached_response = existing.get("response") or {}
@@ -849,6 +849,44 @@ def _commit_order_supabase_first(
             "error_message": None,
             "idempotency_key": idempotency_key,
         }
+
+    # 2b. Per-call dedup: om AI ringer place_order två gånger i samma samtal
+    #     (olika tool_call_id, eller olika items pga LLM-hallucination) vill vi
+    #     INTE skapa en andra order eller skicka ett andra SMS. Replay:a den
+    #     första ordern i det samtalet.
+    if vapi_call_id:
+        existing_call, _ = order_service.lookup_completed_for_call(_supabase_client, vapi_call_id)
+        if existing_call:
+            cached_response = existing_call.get("response") or {}
+            print(
+                f"order_integrity: per-call dedup för call_id={vapi_call_id} → "
+                f"returnerar tidigare order {cached_response.get('order_id')}"
+            )
+            order_service.write_order_event(
+                _supabase_client,
+                event_type="duplicate_place_order_in_call",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=cached_response.get("order_id"),
+                correlation_id=correlation_id,
+                payload={
+                    "vapi_call_id": vapi_call_id,
+                    "first_idempotency_key": existing_call.get("key"),
+                    "second_idempotency_key": idempotency_key,
+                    "second_payload_hash": payload_hash,
+                },
+            )
+            return {
+                "success": True,
+                "order_id": cached_response.get("order_id"),
+                "db_order_id": existing_call.get("db_order_id"),
+                "total_price": cached_response.get("total_price"),
+                "needs_human_review": bool(cached_response.get("needs_human_review")),
+                "idempotent_replay": True,
+                "error_code": None,
+                "error_message": None,
+                "idempotency_key": existing_call.get("key"),
+            }
 
     # Felaktig table = degraded mode (varning, men fortsätt).
     degraded_idempotency = lookup_err == "missing_table"

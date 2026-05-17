@@ -47,6 +47,38 @@ def test_missing_table_returns_marker():
     assert err == "missing_table"
 
 
+def test_lookup_completed_for_call_finds_first_order_for_call_id():
+    db = FakeSupabase()
+    order_service.reserve_idempotency(
+        db, idempotency_key="K1",
+        restaurant_uuid="rest-1", restaurant_id="rest-1",
+        vapi_call_id="call-aaa", vapi_tool_call_id="tool-1", payload_hash="h1",
+    )
+    order_service.complete_idempotency(
+        db, idempotency_key="K1", order_id="ORD-1", db_order_id="db-1",
+        response_payload={"order_id": "ORD-1", "total_price": 120.0, "needs_human_review": False},
+    )
+    row, err = order_service.lookup_completed_for_call(db, "call-aaa")
+    assert err is None
+    assert row is not None
+    assert row["order_id"] == "ORD-1"
+
+    none_row, _ = order_service.lookup_completed_for_call(db, "call-bbb")
+    assert none_row is None
+
+
+def test_lookup_completed_for_call_skips_pending_rows():
+    db = FakeSupabase()
+    order_service.reserve_idempotency(
+        db, idempotency_key="K1",
+        restaurant_uuid="rest-1", restaurant_id="rest-1",
+        vapi_call_id="call-pending", vapi_tool_call_id="tool-1", payload_hash="h1",
+    )
+    row, err = order_service.lookup_completed_for_call(db, "call-pending")
+    assert err is None
+    assert row is None
+
+
 def test_insert_order_row_blocks_duplicate_idempotency_key():
     db = FakeSupabase()
     row = {"restaurant_id": "r", "order_id": "O1", "items": [], "total_price": 0,
