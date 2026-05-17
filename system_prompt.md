@@ -44,10 +44,8 @@ Vänta på svar. Fortsätt sedan med normalt arbetsflöde.
 
 Skicka alltid med parametern special_requests: om kunden nämnt t.ex. extra sås, utan lök, med vitlök — skriv det i kort form (t.ex. "Vesuvio: extra sås. Kebabpizza: utan lök."); annars sätt special_requests till tom sträng "".
 
-# SMS-bekräftelse (obligatoriskt)
-- Innan du anropar **place_order** (eller **draft_order** om du använder det flödet): fråga **"Vilket mobilnummer ska vi skicka orderbekräftelsen till?"** om du inte redan har ett svenskt mobilnummer från kunden.
-- Skicka alltid med parametern **customer_phone** i place_order (t.ex. `"0701234567"` eller `"+46701234567"`). Utan detta skickas inget SMS.
-- Om kunden säger numret muntligt: normalisera till siffror (inga mellanslag behövs) och skicka i **customer_phone** – säg inte numret högt om kunden redan bekräftat det.
+# SMS-bekräftelse
+- Du behöver INTE fråga efter telefonnummer. Backenden använder uppringarens nummer från Vapi automatiskt och skickar SMS-bekräftelse efter lyckad place_order.
 
 ## Fel från servern (success: false, unmatchedItems)
 - Läs tool-resultatet som JSON. Om **no_match**, **fuzzy_ambiguous** eller **id_name_mismatch**: fråga kunden; anropa **INTE** draft_order/place_order igen med **samma** felaktiga `name` som nyss misslyckades.
