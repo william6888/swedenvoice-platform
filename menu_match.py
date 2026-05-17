@@ -377,6 +377,41 @@ def resolve_order_items(
 
         if by_id is not None:
             name = index.canonical_by_id[by_id]
+            # Invariant: om både id och name skickats måste de peka på samma artikel.
+            # Annars kan en fel id-spit från LLM:n göra att kunden får fel rätt.
+            sent_name = (d.get("name") or "").strip()
+            if sent_name:
+                sent_norm = normalize(sent_name)
+                canonical_norm = normalize(name)
+                # Försök även mot aliaslookup för att tillåta legitima alias.
+                alias_match_id = index.lookup.get(sent_norm) or index.lookup.get(sent_norm.replace(" ", ""))
+                names_match = (
+                    sent_norm == canonical_norm
+                    or sent_norm in canonical_norm
+                    or canonical_norm in sent_norm
+                    or alias_match_id == by_id
+                )
+                if not names_match:
+                    print(
+                        'MENU_MATCH rest_id=%s type=id_name_mismatch input=%r id=%s canonical=%r'
+                        % (rest_id_log, sent_name[:80], by_id, name[:80])
+                    )
+                    unmatched.append(
+                        {
+                            "index": i,
+                            "input": sent_name,
+                            "match": {
+                                "type": "id_name_mismatch",
+                                "sent_id": by_id,
+                                "sent_name": sent_name,
+                                "canonical_id": by_id,
+                                "canonical_name": name,
+                                "suggestions": [name],
+                                "scores": [],
+                            },
+                        }
+                    )
+                    continue
             print(
                 'MENU_MATCH rest_id=%s type=exact input=%r -> %r id=%s (via id)'
                 % (rest_id_log, (d.get("name") or "")[:80], name[:80], by_id)
@@ -384,6 +419,7 @@ def resolve_order_items(
             row = dict(d)
             row["id"] = by_id
             row["name"] = name
+            row["matchType"] = "exact"
             resolved.append(row)
             continue
 
@@ -410,6 +446,10 @@ def resolve_order_items(
             row = dict(d)
             row["id"] = iid
             row["name"] = canon
+            # Spara matchType så hot path kan kräva canonical readback för fuzzy_auto.
+            row["matchType"] = mt
+            if mt == "fuzzy_auto":
+                row["matchScore"] = float(m.get("score") or 0.0)
             resolved.append(row)
         elif mt == "fuzzy_ambiguous":
             # Om vi bara har en kandidat och den är stark nog, auto-acceptera istället för att stoppa ordern.
@@ -431,6 +471,8 @@ def resolve_order_items(
                         row = dict(d)
                         row["id"] = target_id
                         row["name"] = target_name
+                        row["matchType"] = "fuzzy_auto"
+                        row["matchScore"] = sc0
                         resolved.append(row)
                         continue
             unmatched.append(

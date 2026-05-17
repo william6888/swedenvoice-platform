@@ -29,8 +29,13 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 
 | Fil | Roll |
 |-----|------|
-| **main.py** | FastAPI-app: `/place_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/vapi/webhook`, `/system_prompt`, `/health`. CORS, köksbong i loggar, Vonage-SMS, Supabase. |
-| **index.html** | Köksdashboard – Bootstrap 5, orderkort, statusuppdatering, auto-refresh. Servas via `/dashboard`. |
+| **main.py** | FastAPI-app: `/place_order`, `/draft_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/vapi/webhook`, `/system_prompt`, `/health`, `/admin/ops/run`, `/admin/ops/incidents`. Använder `order_integrity` + `order_service` så Supabase är system of record (ingen falsk ordersuccess). |
+| **order_integrity.py** | Pure-funktioner: canonical payload, payload_hash, idempotency-key, validering (quantity, status enum, special_request maxlängd, id/name invariant). |
+| **order_service.py** | Supabase-lagret: `idempotency_records`, `order_events`, tenant-scoped fetch/update av `orders`. Soft-fails om migrationen ej är körd. |
+| **ops_agent.py** | Policy-styrd autonom drift: `incidents`, `ops_actions`, tenant_health pause/resume, queue_sms_job. Bara säkra åtgärder tillåts. |
+| **ops_worker.py** | Tick-funktion (`run_tick`) som retryar SMS, dead-letterar efter max-attempts, reconcilar tenant_health och rensar gamla idempotency-rader. |
+| **confirmation.py** | HMAC-signerade draft-tokens + canonical readback. Används av `/draft_order` och verifieras i place_order. |
+| **index.html** | Köksdashboard – XSS-säker (`escapeHtml`), läser från Supabase via `/orders`, hanterar `needs_review`-status. |
 | **menu.json** | Meny (pizzor, kebabs, burgare, tillbehör, drycker) med id, namn, pris, beskrivning. |
 | **orders.json** | Sparade beställningar (persistent). |
 | **system_prompt.md** | AI-personlighet för Vapi – svenska, beställningsflöde, när verktyget `place_order` ska anropas. Kopieras till Vapi Assistant. |
@@ -58,6 +63,11 @@ Allt byggt, testat och dokumenterat. API-nycklar och känslig konfiguration ligg
 | **NUVARANDE_STATUS.md** | Status (t.ex. väntar på Vapi-nyckel). |
 | **PROJECT_SUMMARY.txt** | Sammanfattning av levererat (filstruktur, features, hur man kör). |
 | **ONBOARDING_NY_PIZZERIA.md** | Steg-för-steg checklista för att lägga till en ny pizzeria/restaurang (Supabase, meny, Vapi, alla verktyg). |
+| **GO_LIVE_GATES.md** | Krävda gates innan extern försäljning: migrationer, tester, konfig, manuella livtester, rollback-plan. |
+| **LIVE_READINESS_AUDIT.md** | Hela audit-rapporten: P0/P1-risker, konkurrentanalys, målarkitektur, implementationsplan. |
+| **PHASE1_ORDER_INTEGRITY_SPEC.md** | Teknisk spec för Fas 1 – idempotency, Supabase som SoR, validering. Implementerad. |
+| **supabase_phase1_order_integrity.sql** | Idempotent migration för Fas 1: nya kolumner på orders + nya tabeller (order_events, idempotency_records, incidents, ops_actions, sms_jobs, tenant_health). RLS bara på nya tabellerna – Lovable's anon SELECT på orders rörs INTE. |
+| **tests/** | Pytest-svit: order_integrity, id/name invariant, status enum, draft tokens, FakeSupabase-baserade idempotency- och commit-tester, ops-agent och ops-worker. |
 | **PROBLEM_OCH_ATgarder.md** | Nuvarande problem, vad ändringar orsakat, åtgärder. Backend är tolerant (fallback vid saknad kolumn; startvarning vid RLS/anon). |
 | **SUPABASE_ADD_SPECIAL_INSTRUCTIONS.sql** | Kör en gång i Supabase: lägger till kolumnen special_instructions i orders. |
 
