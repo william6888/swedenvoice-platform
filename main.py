@@ -1286,6 +1286,104 @@ def _get_customer_phone_from_webhook(body: dict, params: Optional[dict] = None) 
     return phone
 
 
+def _cache_customer_phone_for_call(call_id: str, phone: str) -> None:
+    if not call_id or not phone:
+        return
+    _CALL_CUSTOMER_PHONE_CACHE[str(call_id)] = {"phone": phone, "ts": time.time()}
+    if len(_CALL_CUSTOMER_PHONE_CACHE) > _CALL_CACHE_MAX_SIZE:
+        now = time.time()
+        expired = [k for k, v in _CALL_CUSTOMER_PHONE_CACHE.items() if (now - v["ts"]) > _CALL_CACHE_TTL_SEC]
+        for k in expired:
+            del _CALL_CUSTOMER_PHONE_CACHE[k]
+
+
+def _get_cached_customer_phone_for_call(call_id: str) -> Optional[str]:
+    if not call_id:
+        return None
+    entry = _CALL_CUSTOMER_PHONE_CACHE.get(str(call_id))
+    if not entry:
+        return None
+    if (time.time() - entry["ts"]) > _CALL_CACHE_TTL_SEC:
+        del _CALL_CUSTOMER_PHONE_CACHE[str(call_id)]
+        return None
+    return entry.get("phone")
+
+
+def _fetch_vapi_call_record(call_id: str) -> Optional[dict]:
+    """Hämta call-objekt från Vapi API (fallback när webhook saknar kundnummer)."""
+    if not call_id or not VAPI_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.vapi.ai/call/{call_id}",
+            headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+        print(f"DEBUG SMS: Vapi GET /call/{call_id} status={r.status_code}")
+    except Exception as e:
+        print(f"DEBUG SMS: Vapi GET /call failed: {e}")
+    return None
+
+
+def _customer_phone_from_vapi_call_record(record: dict) -> Optional[str]:
+    """Extrahera kundnummer från Vapi call-record (customer.number, message.customer, etc.)."""
+    if not isinstance(record, dict):
+        return None
+    paths = (
+        ("customer", "number"),
+        ("customer", "phone"),
+        ("customer", "phoneNumber"),
+    )
+    phone = _first_phone_from_paths(record, list(paths))
+    if phone:
+        return phone
+    return _recursive_customer_phone_search(record)
+
+
+def _resolve_customer_phone(body: dict, params: Optional[dict] = None) -> Optional[str]:
+    """
+    Hämta kundens mobil för SMS-bekräftelse.
+    Ordning: explicit params/body → cache per call_id → Vapi API GET /call/{id}.
+    """
+    phone = _get_customer_phone_from_webhook(body, params)
+    if phone:
+        call_id = _get_call_id_from_webhook(body)
+        if call_id:
+            _cache_customer_phone_for_call(call_id, phone)
+        return phone
+
+    call_id = _get_call_id_from_webhook(body)
+    if not call_id:
+        return None
+
+    cached = _get_cached_customer_phone_for_call(call_id)
+    if cached:
+        print(f"DEBUG SMS: using cached phone for call_id={call_id}")
+        return cached
+
+    record = _fetch_vapi_call_record(call_id)
+    if not record:
+        return None
+
+    api_phone = _customer_phone_from_vapi_call_record(record)
+    if not api_phone:
+        print(f"DEBUG SMS: Vapi API call {call_id} has no extractable customer phone")
+        return None
+    if _is_blocked_sms_recipient(api_phone):
+        print(
+            f"DEBUG SMS: Vapi API customer.number={api_phone} is restaurant/provider – "
+            "SMS kräver customer_phone från samtalet eller Vonage caller-ID-fix"
+        )
+        return None
+
+    _cache_customer_phone_for_call(call_id, api_phone)
+    print(f"DEBUG SMS: resolved phone from Vapi API for call_id={call_id}")
+    return api_phone
+
+
 def _get_restaurant_id_from_webhook(body: dict) -> str:
     """Legacy: returnerar bara restaurant_id. Använd _get_restaurant_from_webhook för multi-tenant."""
     rid, _ = _get_restaurant_from_webhook(body, None)
@@ -1297,6 +1395,9 @@ def _get_restaurant_id_from_webhook(body: dict) -> str:
 _CALL_RESTAURANT_CACHE: Dict[str, dict] = {}
 _CALL_CACHE_TTL_SEC = 3600
 _CALL_CACHE_MAX_SIZE = 2000
+
+# Cache: call_id -> kundens normaliserade mobil (för SMS) när vi hittat den i webhook eller Vapi API.
+_CALL_CUSTOMER_PHONE_CACHE: Dict[str, dict] = {}
 
 # ==================== FAS 1: SAFETY NET ====================
 # Aktiva-tenant-set: uppdateras var 1:e minut från DB. Vid cache-användning validerar vi mot denna.
@@ -2220,7 +2321,7 @@ def _handle_place_order_params(
       * Fel rätt – id/name invariant och fuzzy_auto markerar needs_review.
       * Pausad tenant – om ops-agent har pausat intake, neka mjukt.
     """
-    customer_phone = _get_customer_phone_from_webhook(body, params)
+    customer_phone = _resolve_customer_phone(body, params)
     items_data = _parse_items_from_params(params, rest_id)
 
     # Råvalidering – innan menymatchning.
@@ -2347,6 +2448,21 @@ def _handle_place_order_params(
             else:
                 _update_order_sms_status(commit.get("db_order_id"), order_id, "missing_phone")
                 print("⚠️  Ingen kundtelefon i place_order – SMS till kund skickades inte")
+                ops_agent.create_incident(
+                    _supabase_client,
+                    incident_type="sms_missing_customer_phone",
+                    severity="P2",
+                    summary=(
+                        f"Order {order_id} sparad utan SMS – inget kundnummer i Vapi/webhook. "
+                        "Be AI skicka customer_phone eller fixa Vonage caller-ID."
+                    ),
+                    restaurant_uuid=restaurant_uuid,
+                    restaurant_id=restaurant_id,
+                    correlation_id=vapi_call_id,
+                    vapi_call_id=vapi_call_id,
+                    order_id=order_id,
+                    human_required=False,
+                )
         elif needs_review:
             ops_agent.create_incident(
                 _supabase_client,
@@ -2868,6 +2984,12 @@ async def vapi_webhook(request: Request):
 
         print("\n" + "-"*50)
         print(f"📞 VAPI WEBHOOK: event_type={event_type}")
+
+        # Värm cache med kundnummer tidigt (status-update, assistant-started, etc.)
+        # så place_order/tool-calls har numret även om payloaden är minimal.
+        _early_call_id = _get_call_id_from_webhook(body)
+        if _early_call_id and event_type not in ("end-of-call-report",):
+            _resolve_customer_phone(body, None)
 
         # Vapi function tools can POST the tool arguments directly to the server URL.
         # Treat that as place_order instead of returning a generic success for an unknown event.
