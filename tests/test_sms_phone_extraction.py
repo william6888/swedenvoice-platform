@@ -67,6 +67,35 @@ class TestCustomerPhoneExtraction(unittest.TestCase):
         params = {"items": [{"id": 1, "quantity": 1}], "customer_phone": "070-765 43 21"}
         self.assertEqual(main._get_customer_phone_from_webhook(body, params), "+46707654321")
 
+    def test_resolve_customer_phone_uses_vapi_api_when_webhook_lacks_customer(self):
+        body = {
+            "message": {
+                "type": "tool-calls",
+                "call": {"id": "call-test-123", "to": "+46769439831"},
+            }
+        }
+        original_fetch = main._fetch_vapi_call_record
+        try:
+            main._fetch_vapi_call_record = lambda _cid: {
+                "id": "call-test-123",
+                "customer": {"number": "+46701234567"},
+            }
+            self.assertEqual(main._resolve_customer_phone(body, {}), "+46701234567")
+            self.assertEqual(main._get_cached_customer_phone_for_call("call-test-123"), "+46701234567")
+        finally:
+            main._fetch_vapi_call_record = original_fetch
+
+    def test_resolve_customer_phone_blocks_restaurant_number_from_vapi_api(self):
+        body = {"message": {"call": {"id": "call-blocked-1"}}}
+        original_fetch = main._fetch_vapi_call_record
+        try:
+            main._fetch_vapi_call_record = lambda _cid: {
+                "customer": {"number": "+46760445700"},
+            }
+            self.assertIsNone(main._resolve_customer_phone(body, {}))
+        finally:
+            main._fetch_vapi_call_record = original_fetch
+
     def test_direct_place_order_payload_is_detected(self):
         body = {"items": [{"name": "Vesuvio", "quantity": 1}], "special_requests": ""}
         self.assertTrue(main._looks_like_place_order_params(body))
