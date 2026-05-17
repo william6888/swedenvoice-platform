@@ -181,7 +181,22 @@
             background: #6c757d;
             color: white;
         }
-        
+
+        .status-needs_review {
+            background: #ff9800;
+            color: white;
+        }
+
+        .status-cancelled {
+            background: #495057;
+            color: white;
+        }
+
+        .status-failed {
+            background: #dc3545;
+            color: white;
+        }
+
         .btn-mark-ready {
             width: 100%;
             padding: 12px;
@@ -325,10 +340,21 @@
             }
         }
         
+        // XSS-säker textinsättning. Kunddata från Vapi-transkript får aldrig injicera HTML.
+        function escapeHtml(value) {
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // Display orders
         function displayOrders(orders) {
             const container = document.getElementById('orders-container');
-            
+
             if (orders.length === 0) {
                 container.innerHTML = `
                     <div class="empty-state">
@@ -339,77 +365,97 @@
                 `;
                 return;
             }
-            
-            // Sort: pending first, then ready, then completed
-            const sortOrder = { 'pending': 1, 'ready': 2, 'completed': 3 };
+
+            // Sort: needs_review first (kräver mänsklig blick), then pending, ready, completed.
+            const sortOrder = { 'needs_review': 0, 'pending': 1, 'ready': 2, 'completed': 3, 'cancelled': 4, 'failed': 5 };
             orders.sort((a, b) => {
-                const statusDiff = sortOrder[a.status] - sortOrder[b.status];
+                const aRank = sortOrder[a.status] !== undefined ? sortOrder[a.status] : 99;
+                const bRank = sortOrder[b.status] !== undefined ? sortOrder[b.status] : 99;
+                const statusDiff = aRank - bRank;
                 if (statusDiff !== 0) return statusDiff;
                 return new Date(b.timestamp) - new Date(a.timestamp);
             });
-            
+
             container.innerHTML = orders.map(order => createOrderCard(order)).join('');
         }
-        
+
         // Create order card HTML
         function createOrderCard(order) {
-            const statusClass = `status-${order.status}`;
+            const statusClass = `status-${escapeHtml(order.status)}`;
             const statusText = {
+                'needs_review': 'Behöver granskning',
                 'pending': 'Väntande',
                 'ready': 'Redo',
-                'completed': 'Klar'
-            }[order.status] || order.status;
-            
+                'completed': 'Klar',
+                'cancelled': 'Avbruten',
+                'failed': 'Fel'
+            }[order.status] || escapeHtml(order.status);
+
             const specialRequestsHtml = order.special_requests ? `
                 <div class="special-requests">
                     <i class="bi bi-exclamation-circle-fill"></i>
-                    <strong>Special:</strong> ${order.special_requests}
+                    <strong>Special:</strong> ${escapeHtml(order.special_requests)}
                 </div>
             ` : '';
-            
-            const itemsHtml = order.items.map(item => `
+
+            const reviewBanner = order.needs_human_review ? `
+                <div class="alert alert-warning py-2 mb-2 mt-2">
+                    <i class="bi bi-shield-exclamation"></i>
+                    <strong>Behöver granskning:</strong> Ordern hade osäker matchning – verifiera innan du markerar som redo.
+                </div>
+            ` : '';
+
+            const itemsHtml = (order.items || []).map(item => `
                 <div class="order-item">
                     <div>
-                        <span class="item-quantity">${item.quantity}x</span>
-                        <span class="item-name">${item.name}</span>
+                        <span class="item-quantity">${escapeHtml(item.quantity)}x</span>
+                        <span class="item-name">${escapeHtml(item.name)}</span>
+                        ${item.special_requests ? `<small class="text-muted d-block"><em>${escapeHtml(item.special_requests)}</em></small>` : ''}
                     </div>
-                    <span class="item-price">${item.price} kr</span>
+                    <span class="item-price">${escapeHtml(item.price !== null && item.price !== undefined ? item.price : '')} kr</span>
                 </div>
             `).join('');
-            
+
+            const safeOrderId = encodeURIComponent(order.order_id || '');
             const actionButton = order.status === 'pending' ? `
-                <button class="btn btn-success btn-mark-ready" onclick="markAsReady('${order.order_id}')">
+                <button class="btn btn-success btn-mark-ready" onclick="markAsReady('${safeOrderId}')">
                     <i class="bi bi-check-circle"></i> Markera som Redo
                 </button>
             ` : order.status === 'ready' ? `
-                <button class="btn btn-secondary btn-mark-ready" onclick="markAsCompleted('${order.order_id}')">
+                <button class="btn btn-secondary btn-mark-ready" onclick="markAsCompleted('${safeOrderId}')">
                     <i class="bi bi-check-all"></i> Markera som Klar
                 </button>
+            ` : order.status === 'needs_review' ? `
+                <button class="btn btn-warning btn-mark-ready" onclick="markAsReady('${safeOrderId}')">
+                    <i class="bi bi-shield-check"></i> Granskat – Markera som Redo
+                </button>
             ` : '';
-            
+
             return `
                 <div class="order-card">
                     <div class="order-header">
                         <div>
-                            <div class="order-id">${order.order_id}</div>
+                            <div class="order-id">${escapeHtml(order.order_id)}</div>
                             <div class="order-time">
-                                <i class="bi bi-clock"></i> ${order.timestamp}
+                                <i class="bi bi-clock"></i> ${escapeHtml(order.timestamp)}
                             </div>
                         </div>
                         <span class="status-badge ${statusClass}">${statusText}</span>
                     </div>
-                    
+
+                    ${reviewBanner}
+
                     <div class="order-items">
                         ${itemsHtml}
                     </div>
-                    
+
                     ${specialRequestsHtml}
-                    
+
                     <div class="order-total">
                         <span class="total-label">Totalt:</span>
-                        <span class="total-amount">${order.total_price} kr</span>
+                        <span class="total-amount">${escapeHtml(order.total_price)} kr</span>
                     </div>
-                    
+
                     ${actionButton}
                 </div>
             `;
@@ -438,6 +484,7 @@
         
         // Update order status
         async function updateOrderStatus(orderId, status) {
+            const rawOrderId = decodeURIComponent(orderId || '');
             try {
                 const response = await fetch(`${API_BASE}/update_order_status`, {
                     method: 'POST',
@@ -445,7 +492,7 @@
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        order_id: orderId,
+                        order_id: rawOrderId,
                         status: status
                     })
                 });

@@ -10,6 +10,11 @@ import os
 import re
 import time
 import menu_match
+import order_integrity
+import order_service
+import ops_agent
+import ops_worker
+import confirmation
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
@@ -19,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 import uvicorn
 
@@ -97,6 +102,27 @@ MENU_FILE = BASE_DIR / "menu.json"
 ORDERS_FILE = BASE_DIR / "orders.json"
 SYSTEM_PROMPT_FILE = BASE_DIR / "system_prompt.md"
 
+# Order integrity feature flags
+# ORDER_REQUIRE_DB_COMMIT=true betyder att backend returnerar success:false
+# om Supabase-commit misslyckas. I produktion ska denna vara true.
+ORDER_REQUIRE_DB_COMMIT = (os.getenv("ORDER_REQUIRE_DB_COMMIT", "true") or "true").strip().lower() == "true"
+# DASHBOARD_FROM_DB=true betyder att /orders och /update_order_status använder
+# Supabase som primär källa istället för orders.json.
+DASHBOARD_FROM_DB = (os.getenv("DASHBOARD_FROM_DB", "true") or "true").strip().lower() == "true"
+# DEFAULT_DASHBOARD_REST_ID styr vilken tenant lokala /dashboard visar i utveckling.
+DEFAULT_DASHBOARD_REST_ID = _clean_env_value("DEFAULT_DASHBOARD_REST_ID", "Gislegrillen_01")
+# REQUIRE_DRAFT_TOKEN=true tvingar AI att gå via /draft_order innan /place_order.
+# Default true: Vapi-flödet ska alltid bekräfta canonical via draft_order innan commit.
+REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "true") or "true").strip().lower() == "true"
+# OPS_AGENT_ENABLED=true startar ops-worker som in-process bakgrundstask.
+# Detta ger autonom drift utan extern cron (Railway/GitHub Actions). Default ON.
+OPS_AGENT_ENABLED = (os.getenv("OPS_AGENT_ENABLED", "true") or "true").strip().lower() == "true"
+# OPS_AGENT_INTERVAL_SEC styr hur ofta ticken körs.
+try:
+    OPS_AGENT_INTERVAL_SEC = max(15, int(os.getenv("OPS_AGENT_INTERVAL_SEC", "90")))
+except ValueError:
+    OPS_AGENT_INTERVAL_SEC = 90
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Gislegrillen Voice AI Order System",
@@ -141,14 +167,44 @@ async def log_post_path(request: Request, call_next):
         print(f">>> INCOMING POST {request.url.path} <<<")
     return await call_next(request)
 
+_OPS_BACKGROUND_TASK = None
+
+
+async def _ops_background_loop():
+    """
+    Periodisk autonom ops-tick. Körs som in-process asyncio-task vid uppstart.
+    Behöver ingen extern cron – ger självläkande drift även om Railway saknar
+    schemaläggare. Tar inga tunga lås, så hot path är opåverkad.
+    """
+    import asyncio as _asyncio
+    # Importera lazy så modulen kan starta även om ops_worker inte hittas.
+    while True:
+        try:
+            await _asyncio.sleep(OPS_AGENT_INTERVAL_SEC)
+            if not _supabase_client:
+                continue
+            # Kör synkrona tick i thread så vi inte blockerar event-loopen.
+            await _asyncio.to_thread(
+                ops_worker.run_tick,
+                _supabase_client,
+                sms_sender=_sms_sender_for_worker,
+            )
+        except _asyncio.CancelledError:
+            print("ops_agent: background loop cancelled")
+            raise
+        except Exception as e:
+            print(f"ops_agent: background tick error: {e}")
+
+
 @app.on_event("startup")
 async def startup_debug():
-    """DEBUG: Logga env och verifiera Supabase-åtkomst vid app-start (körs också på Railway)."""
+    """Verifiera Supabase och starta ops-agenten autonomt om aktiverad."""
     print(f"DEBUG VONAGE: VONAGE_API_KEY={'SET' if VONAGE_API_KEY else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
     print(f"Fas 1: POST /admin/tenants/{{rest_id}}/invalidate (ADMIN_SECRET={'SET' if ADMIN_SECRET else 'MISSING'})")
     print(f"WEBHOOK_SHARED_SECRET: {'SET (Vapi måste skicka header)' if WEBHOOK_SHARED_SECRET else 'NOT SET — /place_order och /vapi/webhook är öppna'}")
+    print(f"REQUIRE_DRAFT_TOKEN: {REQUIRE_DRAFT_TOKEN} (Vapi MÅSTE anropa /draft_order innan /place_order när detta är true)")
     # Kontrollera att vi kan läsa restaurants (RLS kräver service_role; anon får 0 rader)
     if _supabase_client:
         try:
@@ -158,17 +214,46 @@ async def startup_debug():
         except Exception as e:
             print("⚠️  Supabase restaurants-check misslyckades: %s – kontrollera SUPABASE_KEY (använd service_role om RLS är på)" % e)
 
+    if OPS_AGENT_ENABLED:
+        import asyncio as _asyncio
+        global _OPS_BACKGROUND_TASK
+        _OPS_BACKGROUND_TASK = _asyncio.create_task(_ops_background_loop())
+        print(f"✅ Ops-agent kör autonomt (intervall {OPS_AGENT_INTERVAL_SEC}s)")
+    else:
+        print("ℹ️  Ops-agent inaktiverad (OPS_AGENT_ENABLED=false). Använd POST /admin/ops/run manuellt.")
+
+
+@app.on_event("shutdown")
+async def shutdown_ops_agent():
+    """Stäng ner ops-loopen rent vid shutdown."""
+    if _OPS_BACKGROUND_TASK:
+        _OPS_BACKGROUND_TASK.cancel()
+        try:
+            await _OPS_BACKGROUND_TASK
+        except Exception:
+            pass
+
 # ==================== DATA MODELS ====================
 
 class OrderItem(BaseModel):
     id: int
     name: str
-    quantity: int
+    quantity: int = Field(ge=1, le=order_integrity.MAX_QUANTITY_PER_ITEM)
     price: Optional[float] = None
     special_requests: Optional[str] = None
 
+    @field_validator("special_requests")
+    @classmethod
+    def _trim_sr(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        text = str(v).strip()
+        if len(text) > order_integrity.MAX_SPECIAL_REQUEST_LEN:
+            text = text[: order_integrity.MAX_SPECIAL_REQUEST_LEN].rstrip()
+        return text
+
 class PlaceOrderRequest(BaseModel):
-    items: List[OrderItem]
+    items: List[OrderItem] = Field(min_length=1, max_length=order_integrity.MAX_ITEMS_PER_ORDER)
     special_requests: Optional[str] = None
 
 class Order(BaseModel):
@@ -178,10 +263,30 @@ class Order(BaseModel):
     total_price: float
     status: str
     timestamp: str
+    needs_human_review: bool = False
+    confirmation_token: Optional[str] = None
 
 class UpdateOrderStatusRequest(BaseModel):
     order_id: str
     status: str
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, v: str) -> str:
+        raw = (v or "").strip().lower()
+        # Tillåt direktvärden eller en känd alias-mappning. Okända värden ska INTE
+        # tyst falla tillbaka på "pending" – det skulle dölja UI-buggar.
+        accepted = {
+            *order_integrity.ALLOWED_ORDER_STATUSES,
+            "nya", "ny", "new",
+            "redo", "ready_to_pickup", "done",
+            "klar", "complete",
+            "review", "behover_granskning", "behovsgranska",
+            "cancel", "avbruten",
+        }
+        if raw not in accepted:
+            raise ValueError(f"Otillåten status: {v}")
+        return order_integrity.normalize_status(raw)
 
 # ==================== FLOW REGISTRY (multi-tenant / unik logik) ====================
 # Nya flöden: lägg till en handler-funktion och registrera här. Ingen if/else i webhook.
@@ -485,6 +590,486 @@ def _insert_order_to_supabase(
                 return None
         print(f"⚠️  Supabase insert failed: {e}")
         return None
+
+
+def _build_order_row_for_supabase(
+    *,
+    order: Order,
+    restaurant_id: str,
+    restaurant_uuid: Optional[str],
+    customer_name: Optional[str],
+    customer_phone: Optional[str],
+    raw_transcript: Optional[str],
+    vapi_call_id: Optional[str],
+    vapi_tool_call_id: Optional[str],
+    idempotency_key: Optional[str],
+    payload_hash: Optional[str],
+    needs_review: bool,
+    confirmation_token: Optional[str],
+) -> Dict[str, Any]:
+    """Bygg full Supabase-rad inklusive Fas 1 tekniska fält. Schema-fallback hanteras i order_service."""
+
+    items_json: List[Dict[str, Any]] = []
+    for it in order.items:
+        item: Dict[str, Any] = {
+            "id": it.id,
+            "name": it.name,
+            "quantity": int(it.quantity),
+            "price": float(it.price) if it.price is not None else None,
+        }
+        sr = (getattr(it, "special_requests", None) or "").strip()
+        if sr:
+            item["notes"] = sr
+        items_json.append(item)
+
+    row: Dict[str, Any] = {
+        "restaurant_id": restaurant_id or "default",
+        "customer_name": customer_name or "",
+        "customer_phone": customer_phone or "",
+        "items": items_json,
+        "total_price": float(order.total_price),
+        "status": order_integrity.normalize_status(order.status),
+        "raw_transcript": raw_transcript or "",
+        "order_id": order.order_id,
+        "sms_status": "pending" if customer_phone else "missing_phone",
+        "sms_to": customer_phone or "",
+        "special_instructions": (order.special_requests or "").strip(),
+        "vapi_call_id": vapi_call_id,
+        "vapi_tool_call_id": vapi_tool_call_id,
+        "idempotency_key": idempotency_key,
+        "payload_hash": payload_hash,
+        "validation_version": order_integrity.VALIDATION_VERSION,
+        "needs_human_review": bool(needs_review),
+        "confirmation_token": confirmation_token,
+        "source": "vapi",
+    }
+    uuid_val = restaurant_uuid or RESTAURANT_UUID
+    if uuid_val:
+        row["restaurant_uuid"] = uuid_val
+    return row
+
+
+def _build_draft_for_items(
+    *,
+    items: List[OrderItem],
+    raw_items: List[dict],
+    restaurant_uuid: Optional[str],
+    special_requests: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Bygg canonical draft (utan att committa). Används av /draft_order och
+    av place_order när ingen draft_token skickats med.
+    """
+    canonical_items = order_integrity.make_canonical_items_from_resolved(
+        [{
+            "id": it.id,
+            "name": it.name,
+            "quantity": it.quantity,
+            "price": it.price,
+            "special_requests": it.special_requests,
+        } for it in items]
+    )
+    canonical_payload = order_integrity.build_canonical_payload(
+        restaurant_uuid=restaurant_uuid,
+        canonical_items=canonical_items,
+        order_special_requests=(special_requests or "").strip(),
+    )
+    payload_hash = order_integrity.build_payload_hash(canonical_payload)
+    total_price = order_integrity.safe_total_price(canonical_items)
+    needs_review, low_confidence_rows = order_integrity.confidence_summary_for_resolved(
+        [{
+            "id": r.get("id") or it.id,
+            "name": r.get("name") or it.name,
+            "matchType": r.get("matchType"),
+            "matchScore": r.get("matchScore"),
+        } for r, it in zip(raw_items, items)]
+    )
+    needs_review = (not needs_review)  # True om någon rad är låg konfidens
+
+    items_summary = [
+        {"id": ci.item_id, "name": ci.name, "quantity": ci.quantity}
+        for ci in canonical_items
+    ]
+    token, token_payload = confirmation.issue_draft_token(
+        restaurant_uuid=restaurant_uuid,
+        payload_hash=payload_hash,
+        items_summary=items_summary,
+        total_price=total_price,
+        needs_human_review=needs_review,
+    )
+    return {
+        "canonical_items": [ci.to_dict() for ci in canonical_items],
+        "canonical_payload": canonical_payload,
+        "payload_hash": payload_hash,
+        "total_price": total_price,
+        "draft_token": token,
+        "expires_at": token_payload.get("expires_at"),
+        "needs_human_review": needs_review,
+        "low_confidence_rows": low_confidence_rows,
+        "readback": confirmation.format_canonical_readback(
+            [ci.to_dict() for ci in canonical_items],
+            total_price,
+            (special_requests or "").strip(),
+        ),
+    }
+
+
+def _commit_order_supabase_first(
+    *,
+    items: List[OrderItem],
+    raw_items: List[dict],
+    rest_id: str,
+    restaurant_id: str,
+    restaurant_uuid: Optional[str],
+    customer_name: Optional[str],
+    customer_phone: Optional[str],
+    raw_transcript: Optional[str],
+    special_requests: Optional[str],
+    vapi_call_id: Optional[str],
+    vapi_tool_call_id: Optional[str],
+    correlation_id: Optional[str],
+    draft_token: Optional[str] = None,
+    require_draft_token: bool = False,
+) -> Dict[str, Any]:
+    """
+    Centralt commit-flöde för en beställning. Returnerar dict:
+      {
+        "success": bool,
+        "order_id": str | None,
+        "db_order_id": str | None,
+        "total_price": float | None,
+        "needs_human_review": bool,
+        "idempotent_replay": bool,
+        "error_code": str | None,
+        "error_message": str | None,
+      }
+
+    Hot path:
+      1. Bygg canonical_items, payload och idempotency key.
+      2. Slå upp idempotency-rad. Completed → returnera cached response.
+      3. Reservera idempotency-rad.
+      4. Bygg Order, spara till orders.json som backup (non-blocking).
+      5. Insert till Supabase.
+      6. Skriv order_events.
+      7. Markera idempotency completed.
+
+    Vid Supabase-fel: fail idempotency, registrera tenant-failure (kan trigga
+    pause), returnera success:false. Inga falska ordersuccess.
+    """
+
+    # 1. Canonical view + hash + key.
+    canonical_items = order_integrity.make_canonical_items_from_resolved(
+        [{
+            "id": it.id,
+            "name": it.name,
+            "quantity": it.quantity,
+            "price": it.price,
+            "special_requests": it.special_requests,
+        } for it in items]
+    )
+    canonical_payload = order_integrity.build_canonical_payload(
+        restaurant_uuid=restaurant_uuid,
+        canonical_items=canonical_items,
+        order_special_requests=(special_requests or "").strip(),
+    )
+    payload_hash = order_integrity.build_payload_hash(canonical_payload)
+    idempotency_key = order_integrity.build_idempotency_key(
+        restaurant_uuid=restaurant_uuid,
+        vapi_call_id=vapi_call_id,
+        vapi_tool_call_id=vapi_tool_call_id,
+        payload_hash=payload_hash,
+    )
+
+    # 2a. Validera draft-token om den krävs eller skickats. Detta ser till att
+    #     AI inte kan committa en order som inte överensstämmer med canonical
+    #     readback som kunden bekräftat.
+    if draft_token or require_draft_token:
+        ok, token_payload, err_code = confirmation.verify_draft_token(
+            draft_token or "",
+            expected_restaurant_uuid=restaurant_uuid,
+            expected_payload_hash=payload_hash,
+        )
+        if not ok:
+            order_service.write_order_event(
+                _supabase_client,
+                event_type="draft_token_invalid",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=None,
+                correlation_id=correlation_id,
+                payload={"error_code": err_code or "unknown"},
+            )
+            return {
+                "success": False,
+                "order_id": None,
+                "db_order_id": None,
+                "total_price": None,
+                "needs_human_review": False,
+                "idempotent_replay": False,
+                "error_code": "DRAFT_TOKEN_INVALID",
+                "error_message": (
+                    "Beställningen behöver bekräftas igen. Läs upp den för kunden och be om ja."
+                    if err_code != "EXPIRED"
+                    else "Bekräftelsen har gått ut. Be kunden bekräfta beställningen igen."
+                ),
+                "idempotency_key": idempotency_key,
+                "draft_error_code": err_code,
+            }
+
+    # 2. Idempotency lookup.
+    existing, lookup_err = order_service.lookup_existing_idempotency(_supabase_client, idempotency_key)
+    if existing and (existing.get("status") == "completed"):
+        cached_response = existing.get("response") or {}
+        print(
+            f"order_integrity: replay för key={idempotency_key} → returnerar cached order {cached_response.get('order_id')}"
+        )
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="idempotent_replay",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=cached_response.get("order_id"),
+            correlation_id=correlation_id,
+            payload={"idempotency_key": idempotency_key},
+        )
+        return {
+            "success": True,
+            "order_id": cached_response.get("order_id"),
+            "db_order_id": existing.get("db_order_id"),
+            "total_price": cached_response.get("total_price"),
+            "needs_human_review": bool(cached_response.get("needs_human_review")),
+            "idempotent_replay": True,
+            "error_code": None,
+            "error_message": None,
+            "idempotency_key": idempotency_key,
+        }
+
+    # Felaktig table = degraded mode (varning, men fortsätt).
+    degraded_idempotency = lookup_err == "missing_table"
+    if degraded_idempotency:
+        print("order_integrity: idempotency_records saknas – kör degraded mode (kör supabase_phase1_order_integrity.sql).")
+
+    # 3. Försök reservera nyckeln.
+    reserved = False
+    if _supabase_client and not degraded_idempotency:
+        ok, reserve_err = order_service.reserve_idempotency(
+            _supabase_client,
+            idempotency_key=idempotency_key,
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            vapi_call_id=vapi_call_id,
+            vapi_tool_call_id=vapi_tool_call_id,
+            payload_hash=payload_hash,
+        )
+        if ok:
+            reserved = True
+        elif reserve_err == "duplicate":
+            # Race: någon annan request hann före. Hämta deras resultat.
+            existing2, _ = order_service.lookup_existing_idempotency(_supabase_client, idempotency_key)
+            if existing2 and existing2.get("status") == "completed":
+                cached_response = existing2.get("response") or {}
+                return {
+                    "success": True,
+                    "order_id": cached_response.get("order_id"),
+                    "db_order_id": existing2.get("db_order_id"),
+                    "total_price": cached_response.get("total_price"),
+                    "needs_human_review": bool(cached_response.get("needs_human_review")),
+                    "idempotent_replay": True,
+                    "error_code": None,
+                    "error_message": None,
+                    "idempotency_key": idempotency_key,
+                }
+            # Fortfarande processing eller failed → returnera mjukt fel.
+            return {
+                "success": False,
+                "order_id": None,
+                "db_order_id": None,
+                "total_price": None,
+                "needs_human_review": False,
+                "idempotent_replay": False,
+                "error_code": "DUPLICATE_IN_FLIGHT",
+                "error_message": "En identisk beställning behandlas redan. Försök igen om en stund.",
+                "idempotency_key": idempotency_key,
+            }
+        elif reserve_err == "missing_table":
+            degraded_idempotency = True
+        else:
+            # Okänt fel – varna men gå vidare. Ingen falsk ordersuccess sker eftersom Supabase-insert ändå krävs nedan.
+            print(f"order_integrity: reserve_idempotency fail: {reserve_err}")
+
+    # 4. Bygg Order och kör legacy-flödet (orders.json backup + kitchen ticket).
+    needs_review, low_confidence = order_integrity.confidence_summary_for_resolved(
+        [{
+            "id": r.get("id") or it.id,
+            "name": r.get("name") or it.name,
+            "matchType": r.get("matchType"),
+            "matchScore": r.get("matchScore"),
+        } for r, it in zip(raw_items, items)]
+    )
+    needs_review = (not needs_review)  # True om någon rad är låg konfidens
+
+    try:
+        order = _process_place_order(items, special_requests, rest_id=rest_id)
+    except HTTPException as he:
+        if reserved:
+            order_service.fail_idempotency(_supabase_client, idempotency_key, f"process_failure: {he.detail}")
+        return {
+            "success": False,
+            "order_id": None,
+            "db_order_id": None,
+            "total_price": None,
+            "needs_human_review": False,
+            "idempotent_replay": False,
+            "error_code": "ORDER_PROCESS_ERROR",
+            "error_message": str(he.detail),
+            "idempotency_key": idempotency_key,
+        }
+
+    if needs_review:
+        order.needs_human_review = True
+        order.status = "needs_review"
+        # Skriv över i orders.json så lokal dashboard ser rätt status.
+        try:
+            orders = load_orders()
+            for o in orders:
+                if o.get("order_id") == order.order_id:
+                    o["status"] = "needs_review"
+                    o["needs_human_review"] = True
+                    break
+            save_orders(orders)
+        except Exception:
+            pass
+
+    order_service.write_order_event(
+        _supabase_client,
+        event_type="order_built",
+        restaurant_uuid=restaurant_uuid,
+        restaurant_id=restaurant_id,
+        order_id=order.order_id,
+        correlation_id=correlation_id,
+        payload={
+            "items": [it.model_dump() for it in order.items],
+            "total_price": float(order.total_price),
+            "needs_human_review": needs_review,
+            "low_confidence_rows": low_confidence,
+            "idempotency_key": idempotency_key,
+            "payload_hash": payload_hash,
+        },
+    )
+
+    # 5. Insert i Supabase.
+    db_order_id: Optional[str] = None
+    db_error: Optional[str] = None
+    if _supabase_client:
+        row = _build_order_row_for_supabase(
+            order=order,
+            restaurant_id=restaurant_id,
+            restaurant_uuid=restaurant_uuid,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            raw_transcript=raw_transcript,
+            vapi_call_id=vapi_call_id,
+            vapi_tool_call_id=vapi_tool_call_id,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            needs_review=needs_review,
+            confirmation_token=None,
+        )
+        db_order_id, db_error = order_service.insert_order_row(_supabase_client, row)
+        if db_error:
+            print(f"order_integrity: Supabase insert FAIL idempotency_key={idempotency_key} err={db_error}")
+            ops_agent.record_supabase_failure(
+                _supabase_client,
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                error_message=db_error,
+                correlation_id=correlation_id,
+                order_id=order.order_id,
+            )
+            order_service.write_order_event(
+                _supabase_client,
+                event_type="supabase_insert_failed",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=order.order_id,
+                correlation_id=correlation_id,
+                payload={"error": db_error[:500], "idempotency_key": idempotency_key},
+            )
+            if reserved:
+                order_service.fail_idempotency(_supabase_client, idempotency_key, db_error)
+
+            if ORDER_REQUIRE_DB_COMMIT:
+                # Inga falska bekräftelser i produktion.
+                return {
+                    "success": False,
+                    "order_id": None,
+                    "db_order_id": None,
+                    "total_price": None,
+                    "needs_human_review": False,
+                    "idempotent_replay": False,
+                    "error_code": "SUPABASE_COMMIT_FAILED",
+                    "error_message": "Beställningen kunde inte sparas just nu. Försök igen.",
+                    "idempotency_key": idempotency_key,
+                }
+            # Annars (utvecklingsläge): låt JSON-version stå kvar och returnera success med varning.
+        else:
+            ops_agent.record_supabase_success(
+                _supabase_client,
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=order.order_id,
+            )
+            order_service.write_order_event(
+                _supabase_client,
+                event_type="order_committed",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                order_id=order.order_id,
+                correlation_id=correlation_id,
+                payload={"db_order_id": db_order_id, "idempotency_key": idempotency_key},
+            )
+    else:
+        # Ingen Supabase-klient: utveckling/lokalt. ORDER_REQUIRE_DB_COMMIT styr om vi ska
+        # neka eller acceptera. Default i prod: kräv DB.
+        if ORDER_REQUIRE_DB_COMMIT:
+            return {
+                "success": False,
+                "order_id": None,
+                "db_order_id": None,
+                "total_price": None,
+                "needs_human_review": False,
+                "idempotent_replay": False,
+                "error_code": "SUPABASE_NOT_CONFIGURED",
+                "error_message": "Beställning kan inte tas emot just nu. Försök igen.",
+                "idempotency_key": idempotency_key,
+            }
+
+    # 6. Markera idempotency-rad completed.
+    response_payload = {
+        "order_id": order.order_id,
+        "total_price": float(order.total_price),
+        "needs_human_review": needs_review,
+    }
+    if reserved:
+        order_service.complete_idempotency(
+            _supabase_client,
+            idempotency_key=idempotency_key,
+            order_id=order.order_id,
+            db_order_id=db_order_id,
+            response_payload=response_payload,
+        )
+
+    return {
+        "success": True,
+        "order_id": order.order_id,
+        "db_order_id": db_order_id,
+        "total_price": float(order.total_price),
+        "needs_human_review": needs_review,
+        "idempotent_replay": False,
+        "error_code": None,
+        "error_message": None,
+        "idempotency_key": idempotency_key,
+    }
 
 
 def _format_order_sms(order: Order) -> str:
@@ -991,6 +1576,34 @@ def _fetch_restaurant_config_from_db(rest_id: str) -> Optional[dict]:
     return config
 
 
+def _resolve_restaurant_by_external_id(rest_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Slå upp (restaurant_id, restaurant_uuid) baserat på external_id i Supabase.
+    Använder samma config-cache som webhook-flödet om möjligt.
+    Returnerar (None, None) om ej funnen eller Supabase ej konfigurerad.
+    """
+    if not rest_id:
+        return (None, None)
+    rid = rest_id.strip()
+    now = time.time()
+    if rid in _CONFIG_CACHE:
+        entry = _CONFIG_CACHE[rid]
+        if now - entry["ts"] <= _CONFIG_CACHE_TTL_SEC:
+            return (entry.get("restaurant_id"), entry.get("restaurant_uuid"))
+    if not _supabase_client:
+        return (rid, None)
+    try:
+        resp = _supabase_client.table("restaurants").select("external_id, id").eq("external_id", rid).limit(1).execute()
+        rows = getattr(resp, "data", None) or []
+        if rows:
+            ext = rows[0].get("external_id") or rid
+            uuid_val = rows[0].get("id")
+            return (ext, str(uuid_val) if uuid_val else None)
+    except Exception as e:
+        print(f"⚠️  _resolve_restaurant_by_external_id fail: {e}")
+    return (rid, None)
+
+
 def _get_restaurant_config_cached(body: dict, request: Optional[Request]) -> Tuple[Optional[str], Optional[str]]:
     """Fas 1+2: Hämta (restaurant_id, restaurant_uuid) med config-cache (5 min), throttle från DB, aktiva-tenant-validering.
     Returnerar (None, None) om tenant inte är aktiv (t.ex. nyss raderad)."""
@@ -1136,6 +1749,24 @@ def _run_sms_and_alert_on_failure(
         status = "blocked_recipient"
     _update_order_sms_status(db_order_id, order.order_id, status, result.get("to", ""), error_msg)
     _send_sms_failure_alert(rest_id, order.order_id, error_msg)
+    # Vid transient fel: lägg jobb i kön så ops-agenten kan retrya autonomt.
+    is_permanent = error_msg in ("missing_or_invalid_customer_phone", "blocked_business_or_provider_number")
+    if not is_permanent:
+        try:
+            rest_uuid = None
+            if rest_id and rest_id in _CONFIG_CACHE:
+                rest_uuid = _CONFIG_CACHE[rest_id].get("restaurant_uuid")
+            ops_agent.queue_sms_job(
+                _supabase_client,
+                restaurant_uuid=rest_uuid,
+                restaurant_id=rest_id,
+                order_id=order.order_id,
+                db_order_id=db_order_id,
+                to_number=customer_phone or "",
+                body=_format_order_sms(order),
+            )
+        except Exception as e:
+            print(f"⚠️  queue_sms_job after failure soft-fail: {e}")
 
 
 def send_customer_sms_now(
@@ -1412,8 +2043,45 @@ async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100
     return JSONResponse(content={"keywords": keywords, "keyterms": keyterms})
 
 @app.get("/orders")
-async def get_orders():
-    """Get all orders"""
+async def get_orders(rest_id: Optional[str] = None):
+    """
+    Visa ordrar för en tenant.
+
+    Default-källa: Supabase (samma data som Lovable/KDS ser). Detta gör att
+    ägaren aldrig hamnar i ett split brain-scenario där lokal dashboard visar
+    annan data än Lovable.
+
+    Vid Supabase-fel: vi loggar incident och faller tillbaka till orders.json
+    så det lokala köks-skärmflödet inte dör mitt i en lunchrush.
+    """
+    rest_id_q = (rest_id or DEFAULT_DASHBOARD_REST_ID or "").strip()
+    if DASHBOARD_FROM_DB and _supabase_client:
+        rest_uuid: Optional[str] = None
+        try:
+            if rest_id_q:
+                _, rest_uuid = _resolve_restaurant_by_external_id(rest_id_q)
+        except Exception:
+            rest_uuid = None
+        rows, err = order_service.fetch_orders(
+            _supabase_client,
+            restaurant_uuid=rest_uuid,
+            restaurant_id=rest_id_q if not rest_uuid else None,
+            limit=200,
+        )
+        if rows is not None:
+            return JSONResponse(content=[order_service.shape_order_for_dashboard(r) for r in rows])
+        if err:
+            print(f"⚠️  /orders Supabase fail (fallback till orders.json): {err}")
+            ops_agent.create_incident(
+                _supabase_client,
+                incident_type="dashboard_supabase_read_failed",
+                severity="P2",
+                summary="Lokal dashboard kunde inte läsa ordrar från Supabase – fallback till orders.json.",
+                restaurant_uuid=rest_uuid,
+                restaurant_id=rest_id_q,
+                details={"error": err[:500]},
+            )
+    # Fallback / utvecklingsläge.
     orders = load_orders()
     return JSONResponse(content=orders)
 
@@ -1541,60 +2209,183 @@ def _handle_place_order_params(
     restaurant_uuid: Optional[str],
     tool_call_id: str = "direct-place-order",
 ) -> dict:
-    """Gemensam orderhantering för Vapi tool-calls och direct function-tool payloads."""
+    """
+    Gemensam orderhantering för Vapi tool-calls och direct function-tool payloads.
+
+    Skyddar mot:
+      * Tappad/dubblerad order – idempotency via Supabase.
+      * Falsk bekräftelse – success returneras endast efter DB-commit (i produktion).
+      * Fel rätt – id/name invariant och fuzzy_auto markerar needs_review.
+      * Pausad tenant – om ops-agent har pausat intake, neka mjukt.
+    """
     customer_phone = _get_customer_phone_from_webhook(body, params)
     items_data = _parse_items_from_params(params, rest_id)
-    if not items_data:
+
+    # Råvalidering – innan menymatchning.
+    try:
+        order_integrity.validate_raw_items(items_data)
+    except order_integrity.ValidationError as ve:
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="order_rejected_validation",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=None,
+            correlation_id=_get_call_id_from_webhook(body),
+            payload={"error_code": ve.error_code, "details": ve.details},
+        )
         return {
             "name": "place_order",
             "toolCallId": tool_call_id,
-            "result": menu_match.place_order_fail_json("Inga artiklar i beställningen", []),
+            "result": menu_match.place_order_fail_json(ve.message, []),
         }
+
+    # Tenant pausad?
+    paused, paused_reason = ops_agent.is_intake_paused(_supabase_client, restaurant_uuid)
+    if paused:
+        ops_agent.create_incident(
+            _supabase_client,
+            incident_type="intake_paused_blocked_order",
+            severity="P1",
+            summary=f"Order avvisad pga pausad tenant ({paused_reason}).",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            human_required=True,
+        )
+        return {
+            "name": "place_order",
+            "toolCallId": tool_call_id,
+            "result": menu_match.place_order_fail_json(
+                "Beställningar kan inte tas emot just nu. Försök igen lite senare.",
+                [],
+            ),
+        }
+
     rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
     if not rk:
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="order_rejected_menu_match",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=None,
+            correlation_id=_get_call_id_from_webhook(body),
+            payload={"items_data": items_data},
+        )
         return {
             "name": "place_order",
             "toolCallId": tool_call_id,
             "result": fail_json,
         }
+
     try:
-        items = [OrderItem(**it) for it in resolved_items]
-        order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
+        # Bygg OrderItem (Pydantic-validering kör här: quantity ge=1 le=MAX).
+        items = []
+        for it in resolved_items:
+            items.append(OrderItem(
+                id=it["id"],
+                name=it["name"],
+                quantity=it.get("quantity") or 1,
+                price=it.get("price"),
+                special_requests=it.get("special_requests"),
+            ))
         customer_name = params.get("customer_name") or params.get("customerName") or ""
         raw_transcript = _get_raw_transcript_from_webhook(body)
-        db_order_id = _insert_order_to_supabase(
-            order,
-            restaurant_id,
+        vapi_call_id = _get_call_id_from_webhook(body)
+        draft_token = params.get("draft_token") or params.get("draftToken")
+        commit = _commit_order_supabase_first(
+            items=items,
+            raw_items=resolved_items,
+            rest_id=rest_id,
+            restaurant_id=restaurant_id,
+            restaurant_uuid=restaurant_uuid,
             customer_name=customer_name,
             customer_phone=customer_phone,
             raw_transcript=raw_transcript,
-            restaurant_uuid=restaurant_uuid,
+            special_requests=params.get("special_requests"),
+            vapi_call_id=vapi_call_id,
+            vapi_tool_call_id=tool_call_id if tool_call_id != "direct-place-order" else None,
+            correlation_id=vapi_call_id,
+            draft_token=draft_token if isinstance(draft_token, str) else None,
+            require_draft_token=REQUIRE_DRAFT_TOKEN,
         )
-        if not db_order_id:
-            print(
-                "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
-                % order.order_id
-            )
+
+        if not commit["success"]:
+            print(f"❌ place_order commit failed: {commit.get('error_code')} {commit.get('error_message')}")
+            if _circuit_breaker_record_failure(rest_id):
+                _send_circuit_breaker_alert(rest_id)
+            return {
+                "name": "place_order",
+                "toolCallId": tool_call_id,
+                "result": menu_match.place_order_fail_json(
+                    commit.get("error_message") or "Beställningen kunde inte genomföras. Försök igen.",
+                    [],
+                ),
+            }
+
         _circuit_breaker_record_success(rest_id)
-        result = {
+        order_id = commit["order_id"]
+        total_price = commit["total_price"]
+        needs_review = bool(commit.get("needs_human_review"))
+        idempotent_replay = bool(commit.get("idempotent_replay"))
+        # Bygg minimal "order"-objekt för SMS-flödet (vi har redan committed).
+        sms_payload_order = Order(
+            order_id=order_id,
+            items=items,
+            special_requests=params.get("special_requests"),
+            total_price=total_price or 0.0,
+            status="needs_review" if needs_review else "pending",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            needs_human_review=needs_review,
+        )
+        # SMS hoppas över för replays och needs_review (ingen falsk bekräftelse om köket inte godkänt).
+        if not idempotent_replay and not needs_review:
+            if customer_phone:
+                send_customer_sms_now(sms_payload_order, customer_phone, rest_id, commit.get("db_order_id"))
+            else:
+                _update_order_sms_status(commit.get("db_order_id"), order_id, "missing_phone")
+                print("⚠️  Ingen kundtelefon i place_order – SMS till kund skickades inte")
+        elif needs_review:
+            ops_agent.create_incident(
+                _supabase_client,
+                incident_type="order_needs_human_review",
+                severity="P1",
+                summary=f"Order {order_id} kräver mänsklig granskning innan SMS/leverans.",
+                restaurant_uuid=restaurant_uuid,
+                restaurant_id=restaurant_id,
+                correlation_id=vapi_call_id,
+                vapi_call_id=vapi_call_id,
+                order_id=order_id,
+                human_required=True,
+                details={"low_confidence": True},
+            )
+
+        result_payload = {
+            "success": True,
+            "order_id": order_id,
+            "total_price": float(total_price or 0.0),
+            "needs_human_review": needs_review,
+        }
+        if idempotent_replay:
+            result_payload["idempotent_replay"] = True
+        return {
             "name": "place_order",
             "toolCallId": tool_call_id,
-            "result": json.dumps({
-                "success": True,
-                "order_id": order.order_id,
-                "total_price": float(order.total_price),
-            }, ensure_ascii=False),
+            "result": json.dumps(result_payload, ensure_ascii=False),
         }
-        if customer_phone:
-            send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
-        else:
-            _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
-            print("⚠️  Ingen kundtelefon i place_order – SMS till kund skickades inte")
-        return result
     except Exception as e:
         print(f"❌ place_order exception: {e}")
         if _circuit_breaker_record_failure(rest_id):
             _send_circuit_breaker_alert(rest_id)
+        ops_agent.create_incident(
+            _supabase_client,
+            incident_type="place_order_exception",
+            severity="P1",
+            summary=f"Oväntat fel i place_order: {str(e)[:200]}",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            human_required=False,
+        )
         return {
             "name": "place_order",
             "toolCallId": tool_call_id,
@@ -1647,6 +2438,95 @@ def _process_place_order(
     return order
 
 
+@app.post("/draft_order")
+async def draft_order(request: Request):
+    """
+    Returnera canonical readback för en beställning UTAN att committa något.
+
+    AI-flödet:
+      1. Vapi anropar /draft_order med items + special_requests.
+      2. Backend kör menymatchning, validering och bygger canonical payload.
+      3. Backend signerar en draft_token (HMAC) med payload_hash + restaurant_uuid.
+      4. AI läser upp canonical_items + total för kunden och frågar om bekräftelse.
+      5. Vid ja: AI anropar /place_order med draft_token. Backend verifierar att
+         items fortfarande hashar till samma värde innan commit.
+
+    Detta hindrar AI från att lova pickup-tid eller bekräfta beställning innan
+    backend faktiskt godkänt och committat ordern.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(content={"success": False, "error": "Ogiltig JSON-body."}, status_code=400)
+
+    rest_id = (
+        (request.query_params.get("rest_id") or "").strip()
+        or (body or {}).get("rest_id")
+        or DEFAULT_DASHBOARD_REST_ID
+    )
+    if not _circuit_breaker_allow(rest_id):
+        return JSONResponse(content={"success": False, "error": "Temporärt fel. Försök igen om en minut."})
+    if not _token_bucket_allow(rest_id):
+        return JSONResponse(content={"success": False, "error": "För många anrop. Vänta en stund."})
+    restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
+    if restaurant_id is None and restaurant_uuid is None:
+        return JSONResponse(content={"success": False, "error": "Restaurangen kunde inte hittas."})
+
+    paused, reason = ops_agent.is_intake_paused(_supabase_client, restaurant_uuid)
+    if paused:
+        return JSONResponse(content={
+            "success": False,
+            "error": "Beställningar pausade just nu. Försök igen senare.",
+            "reason": reason,
+        })
+
+    items_data = _parse_items_from_params(body, rest_id)
+    try:
+        order_integrity.validate_raw_items(items_data)
+    except order_integrity.ValidationError as ve:
+        return JSONResponse(content={
+            "success": False,
+            "error": ve.message,
+            "error_code": ve.error_code,
+            "details": ve.details,
+        })
+
+    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
+    if not rk:
+        try:
+            payload = json.loads(fail_json)
+        except Exception:
+            payload = {"success": False, "error": "Menymatchning misslyckades."}
+        return JSONResponse(content=payload)
+
+    items = []
+    for it in resolved_items:
+        items.append(OrderItem(
+            id=it["id"],
+            name=it["name"],
+            quantity=it.get("quantity") or 1,
+            price=it.get("price"),
+            special_requests=it.get("special_requests"),
+        ))
+    draft = _build_draft_for_items(
+        items=items,
+        raw_items=resolved_items,
+        restaurant_uuid=restaurant_uuid,
+        special_requests=body.get("special_requests") if isinstance(body, dict) else None,
+    )
+    return JSONResponse(content={
+        "success": True,
+        "canonical_items": draft["canonical_items"],
+        "total_price": draft["total_price"],
+        "payload_hash": draft["payload_hash"],
+        "draft_token": draft["draft_token"],
+        "expires_at": draft["expires_at"],
+        "needs_human_review": draft["needs_human_review"],
+        "low_confidence_rows": draft["low_confidence_rows"],
+        "readback": draft["readback"],
+    })
+
+
 @app.post("/place_order")
 async def place_order(request: Request):
     """
@@ -1691,71 +2571,17 @@ async def place_order(request: Request):
                 calls = _extract_vapi_tool_calls(msg)
                 results = []
                 for tool_call_id, params in calls:
-                    customer_phone = _get_customer_phone_from_webhook(body, params)
-                    items_data = _parse_items_from_params(params, rest_id)
-                    if not items_data:
-                        results.append({
-                            "name": "place_order",
-                            "toolCallId": tool_call_id,
-                            "result": menu_match.place_order_fail_json(
-                                "Inga artiklar i beställningen",
-                                [],
-                            ),
-                        })
-                        continue
-                    rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
-                    if not rk:
-                        results.append({
-                            "name": "place_order",
-                            "toolCallId": tool_call_id,
-                            "result": fail_json,
-                        })
-                        continue
-                    try:
-                        items = [OrderItem(**it) for it in resolved_items]
-                        order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
-                        customer_name = params.get("customer_name") or params.get("customerName") or ""
-                        raw_transcript = _get_raw_transcript_from_webhook(body)
-                        db_order_id = _insert_order_to_supabase(
-                            order,
+                    results.append(
+                        _handle_place_order_params(
+                            params,
+                            body,
+                            request,
+                            rest_id,
                             restaurant_id,
-                            customer_name=customer_name,
-                            customer_phone=customer_phone,
-                            raw_transcript=raw_transcript,
-                            restaurant_uuid=restaurant_uuid,
+                            restaurant_uuid,
+                            tool_call_id=tool_call_id,
                         )
-                        if not db_order_id:
-                            print(
-                                "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
-                                % order.order_id
-                            )
-                        _circuit_breaker_record_success(rest_id)
-                        results.append({
-                            "name": "place_order",
-                            "toolCallId": tool_call_id,
-                            "result": json.dumps({
-                                "success": True,
-                                "order_id": order.order_id,
-                                "total_price": order.total_price
-                            })
-                        })
-                        if customer_phone:
-                            send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
-                        else:
-                            _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
-                            print("⚠️  Ingen kundtelefon i body – SMS till kund skickades inte")
-                    except Exception as e:
-                        print(f"❌ place_order exception: {e}")
-                        if _circuit_breaker_record_failure(rest_id):
-                            _send_circuit_breaker_alert(rest_id)
-                        results.append({
-                            "name": "place_order",
-                            "toolCallId": tool_call_id,
-                            "result": menu_match.place_order_fail_json(
-                                "Beställningen kunde inte genomföras. Försök igen.",
-                                [],
-                            ),
-                        })
+                    )
                 if results:
                     print(f"✅ Vapi tool-call processed, {len(results)} result(s)")
                     return JSONResponse(content={"results": results})
@@ -1790,30 +2616,67 @@ async def place_order(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/update_order_status")
-async def update_order_status(request: UpdateOrderStatusRequest):
-    """Update order status (e.g., pending -> ready -> completed)"""
+async def update_order_status(request: UpdateOrderStatusRequest, rest_id: Optional[str] = None):
+    """
+    Uppdatera orderstatus. Pydantic har redan validerat att status är tillåten.
+
+    Default-källa: Supabase. Detta gör att samma update slår igenom mot Lovable/KDS.
+    Vi uppdaterar även orders.json som backup.
+    """
     try:
+        rest_id_q = (rest_id or DEFAULT_DASHBOARD_REST_ID or "").strip()
+        rest_uuid: Optional[str] = None
+        if rest_id_q:
+            try:
+                _, rest_uuid = _resolve_restaurant_by_external_id(rest_id_q)
+            except Exception:
+                rest_uuid = None
+
+        db_ok = False
+        db_err: Optional[str] = None
+        if DASHBOARD_FROM_DB and _supabase_client:
+            db_ok, db_err = order_service.update_order_status(
+                _supabase_client,
+                order_id=request.order_id,
+                new_status=request.status,
+                restaurant_uuid=rest_uuid,
+                restaurant_id=rest_id_q if not rest_uuid else None,
+            )
+            if db_ok:
+                order_service.write_order_event(
+                    _supabase_client,
+                    event_type="status_changed",
+                    restaurant_uuid=rest_uuid,
+                    restaurant_id=rest_id_q,
+                    order_id=request.order_id,
+                    correlation_id=None,
+                    payload={"new_status": request.status},
+                )
+            else:
+                print(f"⚠️  /update_order_status Supabase fail: {db_err}")
+
         orders = load_orders()
-        
-        # Find and update order
         order_found = False
         for order in orders:
-            if order['order_id'] == request.order_id:
-                order['status'] = request.status
+            if order.get("order_id") == request.order_id:
+                order["status"] = request.status
                 order_found = True
-                print(f"✅ Order {request.order_id} updated to status: {request.status}")
                 break
-        
-        if not order_found:
+        if order_found:
+            save_orders(orders)
+
+        if not db_ok and not order_found:
             raise HTTPException(status_code=404, detail="Order not found")
-        
-        save_orders(orders)
-        
+
+        print(f"✅ Order {request.order_id} status -> {request.status} (db_ok={db_ok}, json_ok={order_found})")
         return JSONResponse(content={
             "success": True,
-            "message": f"Order status updated to {request.status}"
+            "message": f"Order status updated to {request.status}",
+            "supabase_updated": db_ok,
         })
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error updating order status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1886,6 +2749,69 @@ async def admin_invalidate_tenant(rest_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     _invalidate_tenant_caches(rest_id.strip())
     return {"ok": True, "message": "Tenant caches invalidated", "rest_id": rest_id.strip()}
+
+
+def _sms_sender_for_worker(to_number: str, body: str) -> Dict[str, Any]:
+    """Wrapper som ops_worker kan använda för att skicka SMS via Vonage."""
+    to = _normalize_phone_for_sms(to_number)
+    if not to:
+        return {"ok": False, "error": "missing_or_invalid_customer_phone"}
+    if _is_blocked_sms_recipient(to):
+        return {"ok": False, "error": "blocked_business_or_provider_number"}
+    if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
+        return {"ok": False, "error": "vonage_not_configured"}
+    try:
+        r = requests.post(
+            "https://rest.nexmo.com/sms/json",
+            data={
+                "api_key": VONAGE_API_KEY,
+                "api_secret": VONAGE_API_SECRET,
+                "from": VONAGE_FROM_NUMBER,
+                "to": to,
+                "text": body,
+            },
+            timeout=10,
+        )
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        msgs = data.get("messages") or []
+        if msgs and msgs[0].get("status") == "0":
+            return {"ok": True, "to": to}
+        err = (msgs[0].get("error-text") if msgs else None) or r.text
+        return {"ok": False, "error": str(err)[:300]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.post("/admin/ops/run")
+async def admin_ops_run(request: Request):
+    """
+    Kör en ops-tick: SMS retries, tenant health reconciliation, idempotency cleanup.
+    Tänkt att triggas av Railway cron (var 60–120 sek) eller manuellt.
+    Kräver X-Admin-Key = ADMIN_SECRET.
+    """
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    summary = ops_worker.run_tick(_supabase_client, sms_sender=_sms_sender_for_worker)
+    return {"ok": True, "summary": summary}
+
+
+@app.get("/admin/ops/incidents")
+async def admin_ops_incidents(request: Request, status: Optional[str] = None, limit: int = 50):
+    """Visa öppna incidenter för operatören. Kräver X-Admin-Key."""
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not _supabase_client:
+        return {"ok": True, "incidents": [], "note": "Supabase not configured"}
+    try:
+        q = _supabase_client.table("incidents").select("*").order("created_at", desc=True).limit(int(limit))
+        if status:
+            q = q.eq("status", status.strip())
+        resp = q.execute()
+        return {"ok": True, "incidents": getattr(resp, "data", None) or []}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/admin/tenants/{rest_id}/soft-delete")
@@ -1996,72 +2922,17 @@ async def vapi_webhook(request: Request):
             calls = _extract_vapi_tool_calls(msg)
             results = []
             for tool_call_id, params in calls:
-                customer_phone = _get_customer_phone_from_webhook(body, params)
-                items_data = _parse_items_from_params(params, rest_id)
-                if not items_data:
-                    results.append({
-                        "name": "place_order",
-                        "toolCallId": tool_call_id,
-                        "result": menu_match.place_order_fail_json(
-                            "Inga artiklar i beställningen",
-                            [],
-                        ),
-                    })
-                    continue
-                rk, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, rest_id)
-                if not rk:
-                    results.append({
-                        "name": "place_order",
-                        "toolCallId": tool_call_id,
-                        "result": fail_json,
-                    })
-                    continue
-                try:
-                    items = [OrderItem(**it) for it in resolved_items]
-                    order = _process_place_order(items, params.get("special_requests"), rest_id=rest_id)
-                    customer_name = params.get("customer_name") or params.get("customerName") or ""
-                    raw_transcript = _get_raw_transcript_from_webhook(body)
-                    db_order_id = _insert_order_to_supabase(
-                        order,
+                results.append(
+                    _handle_place_order_params(
+                        params,
+                        body,
+                        request,
+                        rest_id,
                         restaurant_id,
-                        customer_name=customer_name,
-                        customer_phone=customer_phone,
-                        raw_transcript=raw_transcript,
-                        restaurant_uuid=restaurant_uuid,
+                        restaurant_uuid,
+                        tool_call_id=tool_call_id,
                     )
-                    if not db_order_id:
-                        print(
-                            "⚠️  Order %s finns i orders.json men sparades EJ i Supabase – Lovable/KDS får ingen notis/data."
-                            % order.order_id
-                        )
-                    _circuit_breaker_record_success(rest_id)
-                    results.append({
-                        "name": "place_order",
-                        "toolCallId": tool_call_id,
-                        "result": json.dumps({
-                            "success": True,
-                            "order_id": order.order_id,
-                            "total_price": float(order.total_price),
-                        }, ensure_ascii=False),
-                    })
-                    print(f"✅ Processed place_order via webhook: {order.order_id} (restaurant_id={restaurant_id}, restaurant_uuid={restaurant_uuid})")
-                    if customer_phone:
-                        send_customer_sms_now(order, customer_phone, rest_id, db_order_id)
-                    else:
-                        _update_order_sms_status(db_order_id, order.order_id, "missing_phone")
-                        print("⚠️  Ingen kundtelefon i webhook – SMS till kund skickades inte")
-                except Exception as e:
-                    print(f"❌ place_order error in webhook: {e}")
-                    if _circuit_breaker_record_failure(rest_id):
-                        _send_circuit_breaker_alert(rest_id)
-                    results.append({
-                        "name": "place_order",
-                        "toolCallId": tool_call_id,
-                        "result": menu_match.place_order_fail_json(
-                            "Beställningen kunde inte genomföras. Försök igen.",
-                            [],
-                        ),
-                    })
+                )
             if results:
                 return JSONResponse(content={"results": results})
         
