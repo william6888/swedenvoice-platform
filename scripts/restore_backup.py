@@ -29,6 +29,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
@@ -57,17 +58,30 @@ UPSERT_KEYS = {
 }
 
 
-def decrypt(path: str) -> dict:
+def decrypt_bytes(blob: bytes) -> dict:
     if not BACKUP_KEY:
         print("❌ BACKUP_ENCRYPTION_KEY saknas i .env")
         sys.exit(1)
-    blob = Path(path).read_bytes()
     try:
         raw = Fernet(BACKUP_KEY.encode()).decrypt(blob)
     except InvalidToken:
         print("❌ Fel nyckel eller korrupt fil – kunde inte dekryptera")
         sys.exit(1)
     return json.loads(gzip.decompress(raw).decode("utf-8"))
+
+
+def decrypt(path: str) -> dict:
+    return decrypt_bytes(Path(path).read_bytes())
+
+
+def download_from_storage(name: str) -> bytes:
+    """Ladda ner en krypterad backup från Supabase Storage-bucket 'backups'."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("❌ SUPABASE_URL/SUPABASE_KEY saknas")
+        sys.exit(1)
+    from supabase import create_client
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return client.storage.from_("backups").download(name)
 
 
 def restore_table(dump: dict, table: str) -> None:
@@ -102,12 +116,19 @@ def restore_table(dump: dict, table: str) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("backup_file")
+    p.add_argument("backup_file", nargs="?", help="Lokal .enc-fil (utelämna om --from-storage)")
+    p.add_argument("--from-storage", metavar="NAMN", help="Ladda ner från Supabase Storage, t.ex. backup_2026-07-02.enc")
     p.add_argument("--export", metavar="FIL", help="Skriv dekrypterad JSON till fil")
     p.add_argument("--restore-table", metavar="TABELL", help="Upserta en tabell till Supabase")
     args = p.parse_args()
 
-    dump = decrypt(args.backup_file)
+    if args.from_storage:
+        dump = decrypt_bytes(download_from_storage(args.from_storage))
+    elif args.backup_file:
+        dump = decrypt(args.backup_file)
+    else:
+        print("❌ Ange en lokal fil eller --from-storage NAMN")
+        sys.exit(1)
     print(f"Backup skapad: {dump.get('created_at')}  (format v{dump.get('format_version')})")
     for table, rows in dump["tables"].items():
         print(f"  {table}: {len(rows)} rader")

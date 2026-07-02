@@ -326,10 +326,59 @@ def cleanup_call_state(
     return summary
 
 
+def maybe_run_daily_backup(
+    supabase_client: Any,
+    *,
+    encryption_key: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Kör en krypterad backup till Supabase Storage EN gång per UTC-dygn.
+
+    Ersätter beroendet av GitHubs opålitliga cron: eftersom Railway-appen kör
+    dygnet runt triggas backupen av första ops-ticken varje nytt dygn. En markör
+    i ops_settings (last_backup_date) gör den idempotent över omstarter, så vi
+    aldrig backar upp flera gånger samma dag. Soft-fail överallt – en misslyckad
+    backup får aldrig störa övrig drift.
+    """
+    summary: Dict[str, Any] = {"ran": False}
+    if not supabase_client or not encryption_key:
+        return summary
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        resp = (
+            supabase_client.table("ops_settings")
+            .select("value")
+            .eq("key", "last_backup_date")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if rows and (rows[0].get("value") or "") == today:
+            return summary  # redan gjort idag
+    except Exception as e:
+        print(f"ops_worker: last_backup_date read soft-fail: {e}")
+
+    try:
+        import backup_core
+
+        result = backup_core.run_backup_to_storage(supabase_client, encryption_key, date_str=today)
+        summary.update({"ran": True, **result})
+        supabase_client.table("ops_settings").upsert(
+            {"key": "last_backup_date", "value": today, "updated_at": _now_iso()},
+            on_conflict="key",
+        ).execute()
+        print(f"ops_worker: daglig backup klar {result}")
+    except Exception as e:
+        print(f"ops_worker: daily backup soft-fail: {e}")
+        summary["error"] = str(e)
+    return summary
+
+
 def run_tick(
     supabase_client: Any,
     *,
     sms_sender: Optional[Callable[[str, str], Dict[str, Any]]] = None,
+    backup_encryption_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Kör en hel ops-tick. Returnerar audit-summary."""
     started = time.time()
@@ -338,6 +387,7 @@ def run_tick(
     cleanup = cleanup_idempotency(supabase_client)
     incidents = auto_resolve_stale_incidents(supabase_client)
     call_state = cleanup_call_state(supabase_client)
+    backup = maybe_run_daily_backup(supabase_client, encryption_key=backup_encryption_key)
     duration = round(time.time() - started, 3)
     summary = {
         "duration_sec": duration,
@@ -346,6 +396,7 @@ def run_tick(
         "cleanup": cleanup,
         "incidents": incidents,
         "call_state": call_state,
+        "backup": backup,
         "ts": _now_iso(),
     }
     print(f"ops_worker: tick done {summary}")
