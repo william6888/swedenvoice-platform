@@ -6,7 +6,6 @@ orders.json
 
 # Railway
 .railway
-railway.json
 
 # Python
 __pycache__/
