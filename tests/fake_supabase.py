@@ -26,6 +26,7 @@ class _Query:
         self._select_cols: Optional[str] = None
         self._order: Optional[Dict[str, Any]] = None
         self._limit: Optional[int] = None
+        self._range: Optional[tuple] = None
         self._upsert_conflict: Optional[str] = None
 
     # ----- read -----
@@ -40,6 +41,11 @@ class _Query:
 
     def limit(self, n: int):
         self._limit = int(n)
+        return self
+
+    def range(self, start: int, end: int):
+        # PostgREST range är inklusivt i båda ändar.
+        self._range = (int(start), int(end))
         return self
 
     # ----- write -----
@@ -145,6 +151,9 @@ class _Query:
                     col = self._order["col"]
                     desc = self._order["desc"]
                     rows.sort(key=lambda r: r.get(col) or "", reverse=bool(desc))
+                if self._range is not None:
+                    start, end = self._range
+                    rows = rows[start : end + 1]
                 if self._limit is not None:
                     rows = rows[: self._limit]
                 return _Result(rows)
@@ -166,12 +175,43 @@ class _Query:
             return _Result([])
 
 
+class _FakeBucket:
+    def __init__(self, store: Dict[str, bytes]):
+        self._store = store
+
+    def upload(self, path: str, data: bytes, file_options: Optional[dict] = None):
+        self._store[path] = bytes(data)
+        return {"path": path}
+
+    def download(self, path: str) -> bytes:
+        if path not in self._store:
+            raise RuntimeError(f"Object not found: {path}")
+        return self._store[path]
+
+    def list(self, *args, **kwargs):
+        return [{"name": k} for k in self._store]
+
+    def remove(self, paths):
+        for p in (paths if isinstance(paths, list) else [paths]):
+            self._store.pop(p, None)
+        return {"removed": paths}
+
+
+class _FakeStorage:
+    def __init__(self):
+        self.buckets: Dict[str, Dict[str, bytes]] = {}
+
+    def from_(self, bucket: str) -> _FakeBucket:
+        return _FakeBucket(self.buckets.setdefault(bucket, {}))
+
+
 class FakeSupabase:
     def __init__(self):
         self.tables: Dict[str, List[Dict[str, Any]]] = {}
         self.simulate_missing_table: Dict[str, bool] = {}
         self.fail_next_on_table: Dict[str, bool] = {}
         self.simulate_unique_violation_on_insert = False
+        self.storage = _FakeStorage()
         self._lock = threading.RLock()
 
     def table(self, name: str) -> _Query:

@@ -1,92 +1,46 @@
 #!/usr/bin/env python3
 """
-Krypterad backup av alla kritiska Supabase-tabeller.
+Manuell krypterad backup av alla kritiska Supabase-tabeller (CLI).
 
-Gratis-alternativ till Supabase PITR: exporterar tabellerna via service-role-
-nyckeln, packar till gzip och krypterar med Fernet (AES-128-CBC + HMAC) innan
-filen lämnar maskinen. Körs nattligen av .github/workflows/backup.yml och
-sparas som GitHub Actions-artifact (30 dagars historik).
+Detta är komplementet till den AUTONOMA dagliga backupen som Railway-appen kör
+(ops_worker.maybe_run_daily_backup → Supabase Storage). Använd detta skript för
+en backup på begäran, t.ex. före en riskabel migration.
 
-VIKTIGT: Utan BACKUP_ENCRYPTION_KEY är backupen oläsbar. Nyckeln finns i .env
-lokalt och som GitHub secret. Förlora den inte.
+Skriver en lokal krypterad fil (går ej att läsa utan BACKUP_ENCRYPTION_KEY).
 
 Användning:
-  python3 scripts/backup_supabase.py                 # skriver backup_YYYYMMDD_HHMMSS.enc
-  python3 scripts/backup_supabase.py --out fil.enc   # eget filnamn
+  python3 scripts/backup_supabase.py                 # backup_YYYYMMDD_HHMMSS.enc
+  python3 scripts/backup_supabase.py --out fil.enc
+  python3 scripts/backup_supabase.py --to-storage    # ladda även upp till Supabase Storage
 
-Återställning: se scripts/restore_backup.py
+Återställning: scripts/restore_backup.py
 """
 
 import argparse
-import gzip
-import io
-import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import requests
-from cryptography.fernet import Fernet
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
 except ImportError:
     pass
 
+import backup_core
+
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or ""
 BACKUP_KEY = os.getenv("BACKUP_ENCRYPTION_KEY") or ""
-
-# Alla tabeller som utgör systemets tillstånd. call_state och idempotency_records
-# är flyktiga men billiga att ta med – hellre för mycket än för lite.
-TABLES = [
-    "restaurants",
-    "restaurant_members",
-    "restaurant_secrets",
-    "menus",
-    "orders",
-    "order_events",
-    "sms_jobs",
-    "incidents",
-    "ops_actions",
-    "ops_settings",
-    "tenant_health",
-    "idempotency_records",
-    "call_state",
-]
-
-PAGE_SIZE = 1000
-
-
-def fetch_table(table: str) -> list:
-    """Hämta alla rader (paginerat) via PostgREST med service-role."""
-    rows: list = []
-    offset = 0
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Range-Unit": "items",
-    }
-    while True:
-        headers["Range"] = f"{offset}-{offset + PAGE_SIZE - 1}"
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?select=*", headers=headers, timeout=30)
-        if r.status_code == 404:
-            print(f"  ⚠️  {table}: finns inte (hoppar över)")
-            return rows
-        r.raise_for_status()
-        batch = r.json()
-        rows.extend(batch)
-        if len(batch) < PAGE_SIZE:
-            return rows
-        offset += PAGE_SIZE
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--out", default=None, help="Utfil (.enc). Default: backup_<tidsstämpel>.enc")
+    p.add_argument("--to-storage", action="store_true", help="Ladda även upp till Supabase Storage-bucket 'backups'")
     args = p.parse_args()
 
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -96,32 +50,25 @@ def main() -> None:
         print("❌ BACKUP_ENCRYPTION_KEY saknas – backup får ALDRIG skrivas okrypterad")
         sys.exit(1)
 
-    dump = {
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "supabase_url": SUPABASE_URL,
-        "format_version": 1,
-        "tables": {},
-    }
-    total = 0
-    for table in TABLES:
-        try:
-            rows = fetch_table(table)
-        except Exception as e:
-            print(f"  ❌ {table}: {e}")
-            sys.exit(1)
-        dump["tables"][table] = rows
-        total += len(rows)
+    from supabase import create_client
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    dump = backup_core.export_all_tables(client)
+    total = sum(len(v) for v in dump["tables"].values())
+    for table, rows in dump["tables"].items():
         print(f"  ✅ {table}: {len(rows)} rader")
 
-    raw = json.dumps(dump, ensure_ascii=False, default=str).encode("utf-8")
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
-        gz.write(raw)
-    encrypted = Fernet(BACKUP_KEY.encode()).encrypt(buf.getvalue())
-
+    blob = backup_core.build_encrypted_blob(dump, BACKUP_KEY)
     out = args.out or f"backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.enc"
-    Path(out).write_bytes(encrypted)
-    print(f"\n🔒 Krypterad backup skriven: {out} ({len(encrypted)} bytes, {total} rader, {len(TABLES)} tabeller)")
+    Path(out).write_bytes(blob)
+    print(f"\n🔒 Krypterad backup: {out} ({len(blob)} bytes, {total} rader, {len(dump['tables'])} tabeller)")
+
+    if args.to_storage:
+        try:
+            res = backup_core.run_backup_to_storage(client, BACKUP_KEY)
+            print(f"☁️  Uppladdad till Supabase Storage: {res['path']}")
+        except Exception as e:
+            print(f"⚠️  Storage-uppladdning misslyckades: {e}")
 
 
 if __name__ == "__main__":

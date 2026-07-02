@@ -130,6 +130,40 @@ def test_sms_job_already_locked_is_skipped():
     assert sent == [("+46700000001", "Hej2")]
 
 
+def test_daily_backup_runs_once_per_day():
+    """Backupen ska köra en gång, ladda upp krypterat, sedan hoppa över samma dag."""
+    from cryptography.fernet import Fernet
+    import backup_core
+
+    db = FakeSupabase()
+    db.tables.setdefault("orders", []).append({"id": "o1", "order_id": "ORD-1"})
+    db.tables.setdefault("restaurants", []).append({"id": "r1", "external_id": "X"})
+    key = Fernet.generate_key().decode()
+
+    res1 = ops_worker.maybe_run_daily_backup(db, encryption_key=key)
+    assert res1["ran"] is True
+    assert res1["ok"] is True
+
+    # Filen finns i storage och kan dekrypteras tillbaka.
+    files = list(db.storage.buckets.get("backups", {}).keys())
+    assert len(files) == 1
+    blob = db.storage.from_("backups").download(files[0])
+    dump = backup_core.decrypt_blob(blob, key)
+    assert "orders" in dump["tables"]
+
+    # Andra körningen samma dag ska hoppa över.
+    res2 = ops_worker.maybe_run_daily_backup(db, encryption_key=key)
+    assert res2["ran"] is False
+
+
+def test_daily_backup_skips_without_key():
+    """Utan krypteringsnyckel ska backupen aldrig köra (får ej skriva okrypterat)."""
+    db = FakeSupabase()
+    res = ops_worker.maybe_run_daily_backup(db, encryption_key=None)
+    assert res["ran"] is False
+    assert "backups" not in db.storage.buckets
+
+
 def test_auto_resolve_stale_incidents_keeps_p0_p1():
     db = FakeSupabase()
     old = (datetime.utcnow() - timedelta(hours=100)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"

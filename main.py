@@ -129,7 +129,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-07-02-autonomy-2"
+BUILD_TAG = "2026-07-02-autonomy-3"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -223,6 +223,7 @@ async def _ops_background_loop():
                 ops_worker.run_tick,
                 _supabase_client,
                 sms_sender=_sms_sender_for_worker,
+                backup_encryption_key=_clean_env_value("BACKUP_ENCRYPTION_KEY") or None,
             )
         except _asyncio.CancelledError:
             print("ops_agent: background loop cancelled")
