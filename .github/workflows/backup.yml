@@ -1,0 +1,53 @@
+name: Nightly encrypted backup
+
+# Gratis backup-lösning (istället för betald Supabase PITR):
+# Exporterar alla kritiska tabeller varje natt, krypterar med Fernet
+# (BACKUP_ENCRYPTION_KEY – utan den är artifacten oläsbar även i publikt repo)
+# och sparar som artifact i 30 dagar. Återställning: scripts/restore_backup.py.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"  # 02:30 UTC varje natt
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests cryptography python-dotenv
+
+      - name: Run encrypted backup
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: python scripts/backup_supabase.py --out backup.enc
+
+      - name: Upload artifact (30 days retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-backup-${{ github.run_id }}
+          path: backup.enc
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Alert owner via SMS if backup failed
+        if: failure()
+        run: |
+          curl -s -X POST https://rest.nexmo.com/sms/json \
+            --data-urlencode "api_key=${{ secrets.VONAGE_API_KEY }}" \
+            --data-urlencode "api_secret=${{ secrets.VONAGE_API_SECRET }}" \
+            --data-urlencode "from=${{ secrets.VONAGE_FROM_NUMBER }}" \
+            --data-urlencode "to=${{ secrets.OWNER_ALERT_PHONE }}" \
+            --data-urlencode "text=[P1] Nattlig Supabase-backup misslyckades. Kolla GitHub Actions." \
+            | head -c 200
