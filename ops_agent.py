@@ -47,6 +47,27 @@ SUPABASE_FAIL_PAUSE_THRESHOLD = 3
 SMS_FAIL_DEADLETTER_AFTER = 5
 INTAKE_RESUME_GREEN_PERIOD_SEC = 120
 
+# ====== Alert-kanal (injiceras av main.py) ======
+# main.py registrerar en sender som skickar SMS/webhook till plattformsägaren.
+# ops_agent känner inte till Vonage-detaljer – bara att kanalen finns.
+_ALERT_SENDER = None  # Callable[[str, str, str], None]: (severity, title, body)
+
+
+def set_alert_sender(sender) -> None:
+    """Registrera funktion som levererar operatörslarm (SMS/Slack/webhook)."""
+    global _ALERT_SENDER
+    _ALERT_SENDER = sender
+
+
+def _deliver_alert(severity: str, title: str, body: str) -> None:
+    """Leverera larm via registrerad kanal. Får ALDRIG raisa in i hot path."""
+    if _ALERT_SENDER is None:
+        return
+    try:
+        _ALERT_SENDER(severity, title, body)
+    except Exception as e:
+        print(f"ops_agent: alert sender soft-fail: {e}")
+
 
 def _now_iso() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -114,6 +135,13 @@ def create_incident(
         f"ops_agent: incident type={incident_type} severity={severity} "
         f"tenant={restaurant_id} call={vapi_call_id} order={order_id} human={human_required}"
     )
+    # P0/P1 ska nå en människa direkt – inte bara ligga i en tabell ingen tittar i.
+    if severity in ("P0", "P1"):
+        _deliver_alert(
+            severity,
+            f"[{severity}] {incident_type} ({restaurant_id or 'plattform'})",
+            (summary or "")[:400],
+        )
     if not supabase_client:
         return None
     row = {
@@ -323,10 +351,11 @@ def alert_operator(
     restaurant_id: Optional[str] = None,
 ) -> None:
     """
-    Skicka alert. Idag: log-only + audit. I framtiden: Slack/email/SMS via
-    konfigurerade kanaler. Designat så att kanal kan bytas utan att rör hot path.
+    Skicka alert till operatören. Levereras via registrerad kanal (SMS/webhook
+    från main.py) + auditloggas. Soft-fail överallt – hot path påverkas aldrig.
     """
     print(f"ops_agent: ALERT severity={severity} title={title}")
+    _deliver_alert(severity, title, body)
     log_action(
         supabase_client,
         action="alert_operator",

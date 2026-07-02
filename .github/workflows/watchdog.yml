@@ -1,0 +1,55 @@
+name: Production watchdog
+
+# Extern övervakning som inte bor i samma process/server som appen:
+#  1. Pingar /health var 15:e minut (3 försök).
+#  2. Om nere: SMS till plattformsägaren via Vonage.
+#  3. Om uppe: kör en backup-ops-tick (/admin/ops/run) ifall den inbyggda
+#     bakgrundsloopen skulle ha dött – dubbel självläkning.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+env:
+  HEALTH_URL: https://web-production-a9a48.up.railway.app/health
+  OPS_RUN_URL: https://web-production-a9a48.up.railway.app/admin/ops/run
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health (3 attempts)
+        id: health
+        run: |
+          ok=0
+          for i in 1 2 3; do
+            code=$(curl -s -o /tmp/health.json -w "%{http_code}" --max-time 15 "$HEALTH_URL" || echo "000")
+            if [ "$code" = "200" ] && grep -q '"healthy"' /tmp/health.json; then
+              ok=1; break
+            fi
+            echo "Attempt $i failed (HTTP $code). Retrying in 20s..."
+            sleep 20
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Alert owner via SMS if down
+        if: steps.health.outputs.ok != '1'
+        run: |
+          curl -s -X POST https://rest.nexmo.com/sms/json \
+            --data-urlencode "api_key=${{ secrets.VONAGE_API_KEY }}" \
+            --data-urlencode "api_secret=${{ secrets.VONAGE_API_SECRET }}" \
+            --data-urlencode "from=${{ secrets.VONAGE_FROM_NUMBER }}" \
+            --data-urlencode "to=${{ secrets.OWNER_ALERT_PHONE }}" \
+            --data-urlencode "text=[P0] Ordersystemet svarar inte pa /health. Kolla Railway: web-production-a9a48" \
+            | head -c 300
+          echo "Health check FAILED – alert sent"
+          exit 1
+
+      - name: Backup ops tick (self-healing redundancy)
+        if: steps.health.outputs.ok == '1'
+        run: |
+          curl -s -X POST --max-time 60 \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_SECRET }}" \
+            "$OPS_RUN_URL" | head -c 500 || echo "(ops tick skipped – non-fatal)"

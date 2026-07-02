@@ -96,10 +96,18 @@ def process_sms_jobs(
             continue
 
         # Markera "sending" så två workers inte plockar samma jobb.
+        # VIKTIGT: verifiera att UPDATE:n faktiskt träffade raden. Om en annan
+        # tick (t.ex. /admin/ops/run parallellt med bakgrundsloopen) redan låst
+        # jobbet matchar WHERE status='pending' 0 rader – då får vi INTE skicka,
+        # annars dubbla SMS till kunden.
         try:
-            supabase_client.table("sms_jobs").update(
+            lock_resp = supabase_client.table("sms_jobs").update(
                 {"status": "sending", "attempts": attempts + 1, "updated_at": _now_iso()}
             ).eq("id", job_id).eq("status", "pending").execute()
+            lock_rows = getattr(lock_resp, "data", None)
+            if isinstance(lock_rows, list) and len(lock_rows) == 0:
+                print(f"ops_worker: sms_job {job_id} redan låst av annan tick – hoppar över")
+                continue
         except Exception as e:
             print(f"ops_worker: lock sms_job fail: {e}")
             continue
@@ -264,6 +272,60 @@ def cleanup_idempotency(
     return summary
 
 
+def auto_resolve_stale_incidents(
+    supabase_client: Any,
+    *,
+    older_than_hours: int = 72,
+) -> Dict[str, Any]:
+    """
+    Auto-stäng gamla P2/P3/INFO-incidenter så listan inte växer i oändlighet
+    och operatören bara ser sådant som är aktuellt. P0/P1 stängs ALDRIG
+    automatiskt – de kräver människa.
+    """
+    summary = {"resolved": 0}
+    if not supabase_client:
+        return summary
+    cutoff = (datetime.utcnow() - timedelta(hours=int(older_than_hours))).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    try:
+        resp = (
+            supabase_client.table("incidents")
+            .update({"status": "resolved"})
+            .eq("status", "open")
+            .in_("severity", ["P2", "P3", "INFO"])
+            .lt("created_at", cutoff)
+            .execute()
+        )
+        data = getattr(resp, "data", None) or []
+        summary["resolved"] = len(data) if isinstance(data, list) else 0
+    except Exception as e:
+        print(f"ops_worker: auto_resolve_stale_incidents fail: {e}")
+    return summary
+
+
+def cleanup_call_state(
+    supabase_client: Any,
+    *,
+    older_than_hours: int = 2,
+) -> Dict[str, Any]:
+    """Rensa gamla call_state-rader (samtal är sekunder–minuter långa; 2h är generöst)."""
+    summary = {"deleted": 0}
+    if not supabase_client:
+        return summary
+    cutoff = (datetime.utcnow() - timedelta(hours=int(older_than_hours))).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    try:
+        resp = (
+            supabase_client.table("call_state")
+            .delete()
+            .lt("updated_at", cutoff)
+            .execute()
+        )
+        data = getattr(resp, "data", None) or []
+        summary["deleted"] = len(data) if isinstance(data, list) else 0
+    except Exception as e:
+        print(f"ops_worker: cleanup_call_state fail: {e}")
+    return summary
+
+
 def run_tick(
     supabase_client: Any,
     *,
@@ -274,12 +336,16 @@ def run_tick(
     sms = process_sms_jobs(supabase_client, sms_sender=sms_sender)
     health = reconcile_tenant_health(supabase_client)
     cleanup = cleanup_idempotency(supabase_client)
+    incidents = auto_resolve_stale_incidents(supabase_client)
+    call_state = cleanup_call_state(supabase_client)
     duration = round(time.time() - started, 3)
     summary = {
         "duration_sec": duration,
         "sms": sms,
         "health": health,
         "cleanup": cleanup,
+        "incidents": incidents,
+        "call_state": call_state,
         "ts": _now_iso(),
     }
     print(f"ops_worker: tick done {summary}")

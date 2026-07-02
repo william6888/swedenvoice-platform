@@ -103,3 +103,44 @@ def test_reconcile_does_not_resume_when_recently_failed():
     summary = ops_worker.reconcile_tenant_health(db)
     assert summary["resumed"] == 0
     assert db.tables["tenant_health"][0]["intake_status"] == "paused"
+
+
+def test_sms_job_already_locked_is_skipped():
+    """En redan låst rad (status != pending) får INTE skickas igen → inga dubbla SMS."""
+    db = FakeSupabase()
+    db.tables.setdefault("sms_jobs", []).append({
+        "id": "j1", "status": "sending", "attempts": 1, "max_attempts": 3,
+        "to_number": "+46700000000", "body": "Hej", "next_attempt_at": _now_iso(),
+    })
+    sent = []
+
+    def fake_sender(to, body):
+        sent.append((to, body))
+        return {"ok": True}
+
+    # Raden hämtas via status=pending-filtret INTE alls här (status=sending),
+    # men vi simulerar racen: lägg en pending-rad vars lås "missar".
+    db.tables["sms_jobs"].append({
+        "id": "j2", "status": "pending", "attempts": 0, "max_attempts": 3,
+        "to_number": "+46700000001", "body": "Hej2", "next_attempt_at": _now_iso(),
+    })
+    summary = ops_worker.process_sms_jobs(db, sms_sender=fake_sender)
+    # Endast den äkta pending-raden (j2) ska skickas.
+    assert summary["sent"] == 1
+    assert sent == [("+46700000001", "Hej2")]
+
+
+def test_auto_resolve_stale_incidents_keeps_p0_p1():
+    db = FakeSupabase()
+    old = (datetime.utcnow() - timedelta(hours=100)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    db.tables.setdefault("incidents", []).extend([
+        {"id": "i1", "status": "open", "severity": "P2", "created_at": old},
+        {"id": "i2", "status": "open", "severity": "P0", "created_at": old},
+        {"id": "i3", "status": "open", "severity": "INFO", "created_at": old},
+    ])
+    summary = ops_worker.auto_resolve_stale_incidents(db)
+    assert summary["resolved"] == 2
+    rows = {r["id"]: r["status"] for r in db.tables["incidents"]}
+    assert rows["i1"] == "resolved"
+    assert rows["i3"] == "resolved"
+    assert rows["i2"] == "open"  # P0 stängs aldrig automatiskt

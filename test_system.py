@@ -24,12 +24,14 @@ def test_menu_structure():
     assert len(menu["pizzas"]) == 52, f"Expected 52 pizzas, found {len(menu['pizzas'])}"
     print(f"  ✅ All 52 pizzas present")
     
-    # Check item structure
+    # Check item structure. Priser är avsiktligt borttagna (betalning på plats),
+    # och _meta är metadata (dict), inte en artikellista – hoppa över den.
     for category, items in menu.items():
+        if not isinstance(items, list):
+            continue
         for item in items:
             assert "id" in item, f"Item missing 'id' in {category}"
             assert "name" in item, f"Item missing 'name' in {category}"
-            assert "price" in item, f"Item missing 'price' in {category}"
             assert "description" in item, f"Item missing 'description' in {category}"
     
     print("  ✅ All items have required fields\n")
@@ -94,24 +96,30 @@ def test_main_py():
         print(f"  ❌ Syntax error in main.py: {e}\n")
         raise
 
-def test_price_calculation():
-    """Test price calculation logic"""
-    print("🔍 Testing price calculation...")
-    
+def test_no_prices_in_menu():
+    """Priser är avsiktligt borttagna – betalning sker på plats, inte via AI:n.
+    Verifiera att inga prisfält finns kvar i menyartiklarna."""
+    print("🔍 Testing that prices are removed...")
+
     with open("menu.json", "r", encoding="utf-8") as f:
         menu = json.load(f)
-    
-    # Test case: 1x Hawaii (125 kr) + 1x Vesuvio (125 kr) = 250 kr
+
+    # Menyn ska fortfarande innehålla rätterna vi förväntar oss.
     hawaii = next((p for p in menu["pizzas"] if p["id"] == 10 and p["name"] == "Hawaii"), None)
     vesuvio = next((p for p in menu["pizzas"] if p["id"] == 2 and p["name"] == "Vesuvio"), None)
-    
     assert hawaii is not None, "Hawaii pizza not found"
     assert vesuvio is not None, "Vesuvio pizza not found"
-    
-    total = hawaii["price"] + vesuvio["price"]
-    assert total == 250, f"Expected 250 kr, got {total} kr"
-    
-    print(f"  ✅ Price calculation works correctly\n")
+
+    # Inga prisfält får finnas kvar någonstans.
+    for category, items in menu.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            assert "price" not in item, (
+                f"Oväntat prisfält kvar i {category}: {item.get('name')}"
+            )
+
+    print(f"  ✅ Menu has no price fields (payment handled on-site)\n")
 
 def main():
     """Run all tests"""
@@ -125,7 +133,7 @@ def main():
         test_system_prompt,
         test_env_template,
         test_main_py,
-        test_price_calculation
+        test_no_prices_in_menu
     ]
     
     failed = 0

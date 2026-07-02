@@ -128,6 +128,9 @@ try:
 except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
+# Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
+BUILD_TAG = "2026-07-02-autonomy-1"
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Gislegrillen Voice AI Order System",
@@ -146,21 +149,32 @@ app.add_middleware(
 
 _VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
 
+# Effektiv webhook-hemlighet: env-variabel har företräde, annars laddas den EN gång
+# vid startup från ops_settings i Supabase (så hemligheten kan sättas utan Railway-
+# access). Laddas bara en gång → ingen DB-läsning på auth hot path. Om laddningen
+# misslyckas förblir den tom = öppet läge (ingen regression), och en varning loggas.
+_EFFECTIVE_WEBHOOK_SECRET = WEBHOOK_SHARED_SECRET
+
+
+def _get_effective_webhook_secret() -> str:
+    return _EFFECTIVE_WEBHOOK_SECRET
+
 
 @app.middleware("http")
 async def verify_vapi_webhook_secret(request: Request, call_next):
-    """Om WEBHOOK_SHARED_SECRET är satt: kräv Bearer eller X-Webhook-Secret på Vapi-endpoints."""
+    """Om en webhook-hemlighet finns (env eller ops_settings): kräv Bearer eller X-Webhook-Secret på Vapi-endpoints."""
     if request.method != "POST" or request.url.path not in _VAPI_PROTECTED_PATHS:
         return await call_next(request)
-    if not WEBHOOK_SHARED_SECRET:
+    secret = _get_effective_webhook_secret()
+    if not secret:
         return await call_next(request)
     auth = (request.headers.get("authorization") or "").strip()
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     header_secret = (request.headers.get("x-webhook-secret") or "").strip()
-    if bearer == WEBHOOK_SHARED_SECRET or header_secret == WEBHOOK_SHARED_SECRET:
+    if bearer == secret or header_secret == secret:
         return await call_next(request)
     return JSONResponse(
-        content={"detail": "Unauthorized", "hint": "Set X-Webhook-Secret or Authorization: Bearer to match WEBHOOK_SHARED_SECRET"},
+        content={"detail": "Unauthorized", "hint": "Set X-Webhook-Secret or Authorization: Bearer to match webhook secret"},
         status_code=401,
     )
 
@@ -208,7 +222,15 @@ async def startup_debug():
     print(f"DEBUG VONAGE: VONAGE_API_SECRET={'SET' if VONAGE_API_SECRET else 'MISSING'}")
     print(f"DEBUG VONAGE: VONAGE_FROM_NUMBER={'SET' if VONAGE_FROM_NUMBER else 'MISSING'}")
     print(f"Fas 1: POST /admin/tenants/{{rest_id}}/invalidate (ADMIN_SECRET={'SET' if ADMIN_SECRET else 'MISSING'})")
-    print(f"WEBHOOK_SHARED_SECRET: {'SET (Vapi måste skicka header)' if WEBHOOK_SHARED_SECRET else 'NOT SET — /place_order och /vapi/webhook är öppna'}")
+    # Ladda webhook-hemlighet från ops_settings om env-varianten saknas (så den kan
+    # sättas utan Railway-access). Görs en gång vid startup → ingen DB-läsning på hot path.
+    global _EFFECTIVE_WEBHOOK_SECRET
+    if not _EFFECTIVE_WEBHOOK_SECRET and _supabase_client:
+        db_secret = _get_ops_setting("webhook_shared_secret")
+        if db_secret:
+            _EFFECTIVE_WEBHOOK_SECRET = db_secret
+            print("✅ Webhook-hemlighet laddad från ops_settings (Supabase).")
+    print(f"WEBHOOK secret: {'SET (Vapi måste skicka header)' if _EFFECTIVE_WEBHOOK_SECRET else 'NOT SET — /place_order och /vapi/webhook är öppna'}")
     print(f"REQUIRE_DRAFT_TOKEN: {REQUIRE_DRAFT_TOKEN} (Vapi MÅSTE anropa /draft_order innan /place_order när detta är true)")
     # Kontrollera att vi kan läsa restaurants (RLS kräver service_role; anon får 0 rader)
     if _supabase_client:
@@ -332,8 +354,14 @@ def _parse_items_from_params(params: dict, rest_id: Optional[str] = None) -> lis
         if "specialRequests" in d and "special_requests" not in d:
             d["special_requests"] = d.pop("specialRequests")
         if "name" not in d and d.get("id") is not None:
-            mi = find_menu_item(int(d["id"]), rest_id)
-            d["name"] = mi["name"] if mi else f"Artikel {d['id']}"
+            # LLM kan skicka icke-numeriskt id ("abc") – får inte krascha till 500,
+            # utan ska ge rent no_match-fel som AI:n kan reparera i samtalet.
+            try:
+                mi = find_menu_item(int(d["id"]), rest_id)
+            except (TypeError, ValueError):
+                mi = None
+                d.pop("id", None)
+            d["name"] = mi["name"] if mi else (d.get("name") or f"Artikel {d.get('id', '?')}")
         out.append(d)
     return out
 
@@ -345,6 +373,13 @@ def load_menu(rest_id: Optional[str] = None) -> dict:
     else:
         path = BASE_DIR / ("menu_%s.json" % rest_id.strip())
         if not path.exists():
+            # MULTI-TENANT-VARNING: en annan pizzeria utan egen menyfil får annars
+            # tyst Gislegrillens meny → fel rätter kan tas emot. Logga högt så det
+            # upptäcks direkt vid onboarding istället för i produktion.
+            print(
+                "⚠️  [ALERT] menu_%s.json saknas – faller tillbaka till standardmenyn (menu.json). "
+                "Skapa en egen menyfil för denna pizzeria innan go-live!" % rest_id.strip()
+            )
             path = MENU_FILE
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -366,13 +401,41 @@ def _menu_cache_key(rest_id: Optional[str]) -> str:
     return ("menu:%s" % rest_id) if rest_id else "menu"
 
 
+def _load_menu_from_db(rest_id: Optional[str]) -> Optional[dict]:
+    """
+    Ladda meny från Supabase-tabellen menus (system of record för multi-tenant).
+    Returnerar None vid saknad rad/tabell/fel → anroparen faller tillbaka till fil.
+    Detta gör onboarding av ny pizzeria till en dataändring istället för en deploy.
+    """
+    if not _supabase_client:
+        return None
+    effective_rest_id = (rest_id or "").strip() or DEFAULT_DASHBOARD_REST_ID
+    try:
+        _, rest_uuid = _resolve_restaurant_by_external_id(effective_rest_id)
+        if not rest_uuid:
+            return None
+        resp = _supabase_client.table("menus").select("menu_json").eq("restaurant_uuid", rest_uuid).limit(1).execute()
+        rows = getattr(resp, "data", None) or []
+        if not rows:
+            return None
+        menu_json = rows[0].get("menu_json")
+        if isinstance(menu_json, str):
+            menu_json = json.loads(menu_json)
+        if isinstance(menu_json, dict) and menu_match.menu_has_items(menu_json):
+            return menu_json
+        print(f"⚠️  DB-menyn för {effective_rest_id} är tom/ogiltig – fallback till fil.")
+    except Exception as e:
+        print(f"⚠️  _load_menu_from_db soft-fail ({effective_rest_id}): {e}")
+    return None
+
+
 def get_menu_cached(rest_id: Optional[str] = None) -> dict:
-    """Return menu from cache if valid, else load from file and cache. rest_id för framtida per-tenant meny."""
+    """Return menu from cache if valid. Källordning: Supabase menus → menyfil. Cache TTL 3 min."""
     key = ("menu:%s" % rest_id) if rest_id else "menu"
     now = time.time()
     if key in _MENU_CACHE and now < _MENU_CACHE[key]["expires_at"]:
         return _MENU_CACHE[key]["data"]
-    menu = load_menu(rest_id)
+    menu = _load_menu_from_db(rest_id) or load_menu(rest_id)
     _MENU_CACHE[key] = {"data": menu, "expires_at": now + _MENU_CACHE_TTL_SEC}
     return menu
 
@@ -402,11 +465,18 @@ def save_orders(orders):
         json.dump(orders, f, indent=2, ensure_ascii=False)
 
 def find_menu_item(item_id: int, rest_id: Optional[str] = None):
-    """Find menu item by ID across all categories. Uses cached menu (TTL 3 min)."""
+    """Find menu item by ID across all categories. Uses cached menu (TTL 3 min).
+
+    Robust mot icke-artikel-nycklar i menu.json (t.ex. metadata som 'modifiers',
+    'info', 'service_options'): hoppar över kategorier som inte är listor och
+    poster som inte är dict.
+    """
     menu = get_menu_cached(rest_id)
     for category in menu.values():
+        if not isinstance(category, list):
+            continue
         for item in category:
-            if item.get('id') == item_id:
+            if isinstance(item, dict) and item.get('id') == item_id:
                 return item
     return None
 
@@ -453,13 +523,21 @@ def _resolve_items_with_menu_match(
 
 
 def calculate_total_price(items: List[OrderItem], rest_id: Optional[str] = None) -> float:
-    """Calculate total price from order items. rest_id = vilken pizzeria (rätt meny, rätt priser)."""
+    """Summera pris från orderrader om priser finns i menyn.
+
+    Priser är avsiktligt borttagna från menyn – betalning sker på plats/i kassan,
+    inte via AI:n. Saknas pris behandlas det som 0 så inget kraschar och ordern
+    fungerar ändå utan att veta vad maten kostar. Returnerar 0.0 när priser saknas.
+    """
     total = 0.0
     for item in items:
         menu_item = find_menu_item(item.id, rest_id)
         if menu_item:
-            total += menu_item["price"] * item.quantity
-    return total
+            try:
+                total += float(menu_item.get("price") or 0) * item.quantity
+            except (TypeError, ValueError):
+                continue
+    return round(total, 2)
 
 def generate_order_id() -> str:
     """Generate unique order ID (undviker kollision vid flera orders/samme sekund)"""
@@ -477,12 +555,11 @@ def print_kitchen_ticket(order: Order):
     print("-"*60)
     print("ARTIKLAR:")
     for item in order.items:
-        print(f"  [{item.quantity}x] {item.name} ({item.price} kr)")
+        print(f"  [{item.quantity}x] {item.name}")
     print("-"*60)
     if order.special_requests:
         print(f"⚠️  SPECIAL: {order.special_requests}")
         print("-"*60)
-    print(f"TOTALT: {order.total_price} kr")
     print("="*60)
     print(f"STATUS: {order.status.upper()}")
     print("="*60 + "\n")
@@ -539,7 +616,7 @@ def _insert_order_to_supabase(
             row["sms_to"] = customer_phone or ""
         if include_special_instructions:
             row["special_instructions"] = (order.special_requests or "").strip() or ""
-        uuid_val = restaurant_uuid or RESTAURANT_UUID
+        uuid_val = restaurant_uuid or (RESTAURANT_UUID if (restaurant_id or "") == DEFAULT_DASHBOARD_REST_ID else None)
         if uuid_val:
             row["restaurant_uuid"] = uuid_val
         else:
@@ -648,7 +725,8 @@ def _build_order_row_for_supabase(
         "confirmation_token": confirmation_token,
         "source": "vapi",
     }
-    uuid_val = restaurant_uuid or RESTAURANT_UUID
+    # Env-UUID-fallback endast för default-tenanten (annars fel kök vid DB-glapp).
+    uuid_val = restaurant_uuid or (RESTAURANT_UUID if (restaurant_id or "") == DEFAULT_DASHBOARD_REST_ID else None)
     if uuid_val:
         row["restaurant_uuid"] = uuid_val
     return row
@@ -1187,16 +1265,32 @@ def _commit_order_supabase_first(
     }
 
 
-def _format_order_sms(order: Order) -> str:
+def _get_tenant_branding(rest_id: Optional[str]) -> Dict[str, str]:
     """
-    Formatera beställning till SMS-text.
+    Hämta SMS-branding (namn + kontaktnummer) för en tenant från config-cachen.
+    Gislegrillen-defaults för bakåtkompatibilitet om DB-kolumner saknas.
+    """
+    entry = _CONFIG_CACHE.get((rest_id or "").strip()) or {}
+    return {
+        "name": (entry.get("display_name") or "").strip() or "Gislegrillen",
+        "contact_phone": (entry.get("contact_phone") or "").strip() or "+46760445700",
+    }
+
+
+def _format_order_sms(order: Order, branding: Optional[Dict[str, str]] = None) -> str:
+    """
+    Formatera beställning till SMS-text. branding = {name, contact_phone} per tenant,
+    så pizzeria nr 2 inte skickar "från Gislegrillen" med fel telefonnummer.
 
     AI skickar special_requests antingen per rad (item.special_requests) eller som
     en toppnivå-sträng (order.special_requests, t.ex. "Vesuvio: extra sas.").
     Vi visar BÅDA så kunden alltid ser sina ändringar i SMS:et – samma info
     som köket ser i KDS.
     """
-    lines = ["Hej! Detta är din orderbekräftelse från Gislegrillen.", ""]
+    b = branding or {}
+    brand_name = (b.get("name") or "").strip() or "Gislegrillen"
+    contact = (b.get("contact_phone") or "").strip() or "+46760445700"
+    lines = [f"Hej! Detta är din orderbekräftelse från {brand_name}.", ""]
     per_item_seen: List[str] = []
     for item in order.items:
         part = f"{item.quantity}x {item.name}"
@@ -1209,7 +1303,7 @@ def _format_order_sms(order: Order) -> str:
     if top_level and top_level not in per_item_seen:
         lines.append("")
         lines.append(f"Önskemål: {top_level}")
-    lines.extend(["", "Är din beställning felaktig? Ring oss: +46760445700"])
+    lines.extend(["", f"Är din beställning felaktig? Ring oss: {contact}"])
     return "\n".join(lines)
 
 
@@ -1298,16 +1392,16 @@ def _recursive_customer_phone_search(value: Any, path: Tuple[str, ...] = ()) -> 
     return None
 
 
-def send_sms_order_confirmation(order: Order, to_number: str) -> bool:
+def send_sms_order_confirmation(order: Order, to_number: str, branding: Optional[Dict[str, str]] = None) -> bool:
     """
     Skicka SMS-orderbekräftelse via Vonage.
     Returnerar True vid lyckat skickande, False annars.
     Blockerar ALDRIG – fel loggas men kastas inte.
     """
-    return _send_sms_order_confirmation_result(order, to_number)["ok"]
+    return _send_sms_order_confirmation_result(order, to_number, branding)["ok"]
 
 
-def _send_sms_order_confirmation_result(order: Order, to_number: str) -> dict:
+def _send_sms_order_confirmation_result(order: Order, to_number: str, branding: Optional[Dict[str, str]] = None) -> dict:
     """Skicka SMS och returnera strukturerad status för Supabase-spårning."""
     to = _normalize_phone_for_sms(to_number)
     if not to:
@@ -1320,7 +1414,7 @@ def _send_sms_order_confirmation_result(order: Order, to_number: str) -> dict:
         print("⚠️  Vonage not configured. Skipping SMS.")
         return {"ok": False, "to": to, "error": "vonage_not_configured"}
     print(f"DEBUG SMS: Vonage config OK, calling API for to_number={to_number}")
-    text = _format_order_sms(order)
+    text = _format_order_sms(order, branding)
     try:
         r = requests.post(
             "https://rest.nexmo.com/sms/json",
@@ -1416,7 +1510,12 @@ def _get_customer_phone_from_webhook(body: dict, params: Optional[dict] = None) 
 def _cache_customer_phone_for_call(call_id: str, phone: str) -> None:
     if not call_id or not phone:
         return
+    existing = _CALL_CUSTOMER_PHONE_CACHE.get(str(call_id))
+    is_new_value = not existing or existing.get("phone") != phone
     _CALL_CUSTOMER_PHONE_CACHE[str(call_id)] = {"phone": phone, "ts": time.time()}
+    if is_new_value:
+        # Persistera bara vid förändring – webhook-events kommer tätt under samtalet.
+        _persist_call_state(call_id, customer_phone=phone)
     if len(_CALL_CUSTOMER_PHONE_CACHE) > _CALL_CACHE_MAX_SIZE:
         now = time.time()
         expired = [k for k, v in _CALL_CUSTOMER_PHONE_CACHE.items() if (now - v["ts"]) > _CALL_CACHE_TTL_SEC]
@@ -1428,12 +1527,19 @@ def _get_cached_customer_phone_for_call(call_id: str) -> Optional[str]:
     if not call_id:
         return None
     entry = _CALL_CUSTOMER_PHONE_CACHE.get(str(call_id))
-    if not entry:
-        return None
-    if (time.time() - entry["ts"]) > _CALL_CACHE_TTL_SEC:
+    if entry and (time.time() - entry["ts"]) > _CALL_CACHE_TTL_SEC:
         del _CALL_CUSTOMER_PHONE_CACHE[str(call_id)]
-        return None
-    return entry.get("phone")
+        entry = None
+    if entry:
+        return entry.get("phone")
+    # Minne tomt (t.ex. efter deploy mitt i samtalet): återhämta från Supabase.
+    state = _load_call_state_from_db(call_id)
+    phone = (state or {}).get("customer_phone")
+    if phone:
+        _CALL_CUSTOMER_PHONE_CACHE[str(call_id)] = {"phone": phone, "ts": time.time()}
+        print(f"call_state: kundnummer återhämtat från DB för call_id={call_id}")
+        return phone
+    return None
 
 
 def _fetch_vapi_call_record(call_id: str) -> Optional[dict]:
@@ -1529,6 +1635,40 @@ _CALL_CUSTOMER_PHONE_CACHE: Dict[str, dict] = {}
 # Cache: call_id -> senaste draft (token + hash) så place_order fungerar även om AI glömmer skicka draft_token.
 _CALL_DRAFT_CACHE: Dict[str, dict] = {}
 
+
+def _persist_call_state(call_id: str, **fields: Any) -> None:
+    """
+    Spegla samtalstillstånd (tenant, kundnummer, draft) till Supabase-tabellen
+    call_state. Utan detta tappas pågående samtal vid deploy/omstart eftersom
+    in-memory-cacherna nollställs. Soft-fail – får aldrig störa hot path.
+    """
+    if not call_id or not _supabase_client:
+        return
+    row: Dict[str, Any] = {
+        "call_id": str(call_id),
+        "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+    }
+    for k, v in fields.items():
+        if v is not None:
+            row[k] = v
+    try:
+        _supabase_client.table("call_state").upsert(row, on_conflict="call_id").execute()
+    except Exception as e:
+        print(f"call_state: persist soft-fail: {e}")
+
+
+def _load_call_state_from_db(call_id: str) -> Optional[dict]:
+    """Läs samtalstillstånd från Supabase efter omstart. Soft-fail till None."""
+    if not call_id or not _supabase_client:
+        return None
+    try:
+        resp = _supabase_client.table("call_state").select("*").eq("call_id", str(call_id)).limit(1).execute()
+        rows = getattr(resp, "data", None) or []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"call_state: load soft-fail: {e}")
+        return None
+
 # ==================== FAS 1: SAFETY NET ====================
 # Aktiva-tenant-set: uppdateras var 1:e minut från DB. Vid cache-användning validerar vi mot denna.
 _ACTIVE_TENANT_UUIDS: set = set()
@@ -1602,11 +1742,19 @@ def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid
     if not call_id:
         return
     now = time.time()
+    existing = _CALL_RESTAURANT_CACHE.get(str(call_id))
+    is_new_value = (
+        not existing
+        or existing.get("restaurant_id") != restaurant_id
+        or existing.get("restaurant_uuid") != restaurant_uuid
+    )
     _CALL_RESTAURANT_CACHE[str(call_id)] = {
         "restaurant_id": restaurant_id,
         "restaurant_uuid": restaurant_uuid,
         "ts": now,
     }
+    if is_new_value:
+        _persist_call_state(call_id, restaurant_id=restaurant_id, restaurant_uuid=restaurant_uuid)
     if len(_CALL_RESTAURANT_CACHE) <= _CALL_CACHE_MAX_SIZE:
         return
     # Rensa utgångna
@@ -1620,12 +1768,20 @@ def _cache_restaurant_for_call(call_id: str, restaurant_id: str, restaurant_uuid
 
 
 def _get_restaurant_for_webhook(body: dict, request: Optional[Request] = None) -> Tuple[str, Optional[str]]:
-    """Hämta (restaurant_id, restaurant_uuid) för detta anrop. Använder cache på call_id om tillgänglig, annars lookup från rest_id."""
+    """Hämta (restaurant_id, restaurant_uuid) för detta anrop. Ordning: minnescache → call_state i DB (överlever omstart) → lookup från rest_id."""
     call_id = _get_call_id_from_webhook(body)
     if call_id and call_id in _CALL_RESTAURANT_CACHE:
         entry = _CALL_RESTAURANT_CACHE[call_id]
         if (time.time() - entry["ts"]) <= _CALL_CACHE_TTL_SEC:
             return (entry["restaurant_id"], entry["restaurant_uuid"])
+    if call_id:
+        state = _load_call_state_from_db(call_id)
+        if state and state.get("restaurant_id"):
+            rid = state["restaurant_id"]
+            ruuid = state.get("restaurant_uuid")
+            _CALL_RESTAURANT_CACHE[str(call_id)] = {"restaurant_id": rid, "restaurant_uuid": ruuid, "ts": time.time()}
+            print(f"call_state: restaurang återhämtad från DB för call_id={call_id}")
+            return (rid, ruuid)
     restaurant_id, restaurant_uuid = _get_restaurant_from_webhook(body, request)
     if call_id:
         _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
@@ -1687,7 +1843,12 @@ def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) 
                     return (row["external_id"], str(row["id"]))
             except Exception as e:
                 print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
-    return (rest_id, RESTAURANT_UUID)
+    # Fallback: RESTAURANT_UUID (Gislegrillens UUID i env) får ENDAST användas för
+    # default-tenanten. Annars skulle en annan pizzerias order kunna sparas under
+    # Gislegrillens UUID och hamna i fel kök.
+    if rest_id == DEFAULT_DASHBOARD_REST_ID:
+        return (rest_id, RESTAURANT_UUID)
+    return (rest_id, None)
 
 
 def _refresh_active_tenant_set() -> None:
@@ -1761,9 +1922,10 @@ def _fetch_restaurant_config_from_db(rest_id: str) -> Optional[dict]:
     Tolerant om throttle-kolumner eller restaurant_secrets saknas (fallback till default)."""
     if not _supabase_client:
         return None
+    # Kolumn-fallback i tre steg: full config (m. branding) → throttle → minimal.
     try:
         r = _supabase_client.table("restaurants").select(
-            "id, external_id, throttle_bucket_size, throttle_refill_per_sec"
+            "id, external_id, name, contact_phone, throttle_bucket_size, throttle_refill_per_sec"
         ).eq("external_id", rest_id).is_("deleted_at", "null").limit(1).execute()
     except Exception:
         try:
@@ -1797,6 +1959,8 @@ def _fetch_restaurant_config_from_db(rest_id: str) -> Optional[dict]:
         "restaurant_uuid": restaurant_uuid,
         "throttle_bucket_size": bucket,
         "throttle_refill_per_sec": refill,
+        "display_name": (row.get("name") or "").strip(),
+        "contact_phone": (row.get("contact_phone") or "").strip(),
     }
     try:
         sec = _supabase_client.table("restaurant_secrets").select("encrypted_config").eq("restaurant_uuid", row["id"]).limit(1).execute()
@@ -1857,6 +2021,10 @@ def _get_restaurant_config_cached(body: dict, request: Optional[Request]) -> Tup
     if db_config:
         entry["throttle_bucket_size"] = db_config.get("throttle_bucket_size", _TOKEN_BUCKET_DEFAULT_SIZE)
         entry["throttle_refill_per_sec"] = db_config.get("throttle_refill_per_sec", _TOKEN_BUCKET_DEFAULT_REFILL_PER_SEC)
+        if db_config.get("display_name"):
+            entry["display_name"] = db_config["display_name"]
+        if db_config.get("contact_phone"):
+            entry["contact_phone"] = db_config["contact_phone"]
         if db_config.get("tenant_secrets"):
             entry["tenant_secrets"] = db_config["tenant_secrets"]
     _CONFIG_CACHE[rest_id] = entry
@@ -1904,11 +2072,86 @@ def _circuit_breaker_record_success(rest_id: str) -> None:
 
 
 def _send_circuit_breaker_alert(rest_id: str) -> None:
-    """Logga när circuit breaker öppnas (kolla Railway-/serverloggar)."""
+    """Larma när circuit breaker öppnas – loggas, auditloggas och når ägaren via larmkanal."""
     print(
         "⚠️  [ALERT] Circuit breaker ÖPPNAD för rest_id=%s – %d fel på %d s. Kontrollera konfiguration."
         % (rest_id, _CIRCUIT_FAIL_THRESHOLD, _CIRCUIT_WINDOW_SEC)
     )
+    ops_agent.alert_operator(
+        _supabase_client,
+        severity="P1",
+        title=f"Circuit breaker öppnad ({rest_id})",
+        body=f"{_CIRCUIT_FAIL_THRESHOLD} orderfel på {_CIRCUIT_WINDOW_SEC}s – nya beställningar nekas i {_CIRCUIT_OPEN_DURATION_SEC}s.",
+        restaurant_id=rest_id,
+    )
+
+
+# ==================== OPERATÖRSLARM (P0/P1 måste nå en människa) ====================
+# Kanal-prioritet: env-variabel → ops_settings i Supabase (så plattformsägaren kan
+# ändra utan deploy). Rate-limit per larmtyp så en felstorm inte ger 100 SMS.
+OWNER_ALERT_PHONE = _clean_env_value("OWNER_ALERT_PHONE")
+ALERT_WEBHOOK_URL = _clean_env_value("ALERT_WEBHOOK_URL")
+_OPS_SETTINGS_CACHE: Dict[str, Any] = {"data": {}, "ts": 0.0}
+_OPS_SETTINGS_TTL_SEC = 600
+_OPERATOR_ALERT_LAST: Dict[str, float] = {}
+_OPERATOR_ALERT_MIN_INTERVAL_SEC = 1800
+
+
+def _get_ops_setting(key: str) -> str:
+    """Läs plattformsinställning från ops_settings (cache 10 min). Soft-fail till tomt."""
+    now = time.time()
+    if now - _OPS_SETTINGS_CACHE["ts"] > _OPS_SETTINGS_TTL_SEC:
+        _OPS_SETTINGS_CACHE["ts"] = now
+        if _supabase_client:
+            try:
+                resp = _supabase_client.table("ops_settings").select("key, value").execute()
+                _OPS_SETTINGS_CACHE["data"] = {
+                    r["key"]: (r.get("value") or "") for r in (getattr(resp, "data", None) or [])
+                }
+            except Exception as e:
+                print(f"⚠️  ops_settings read soft-fail: {e}")
+    return (_OPS_SETTINGS_CACHE["data"].get(key) or "").strip()
+
+
+def _send_operator_alert(severity: str, title: str, body: str) -> None:
+    """Leverera larm till plattformsägaren: SMS via Vonage + valfri webhook. Får aldrig raisa."""
+    now = time.time()
+    key = f"{severity}:{title[:80]}"
+    last = _OPERATOR_ALERT_LAST.get(key)
+    if last is not None and (now - last) < _OPERATOR_ALERT_MIN_INTERVAL_SEC:
+        print(f"ops_alert: undertryckt (rate limit) {key}")
+        return
+    _OPERATOR_ALERT_LAST[key] = now
+    text = f"{title}\n{body}".strip()[:500]
+
+    webhook_url = ALERT_WEBHOOK_URL or _get_ops_setting("alert_webhook_url")
+    if webhook_url:
+        try:
+            requests.post(webhook_url, json={"text": text}, timeout=8)
+        except Exception as e:
+            print(f"ops_alert: webhook soft-fail: {e}")
+
+    phone = _normalize_phone_for_sms(OWNER_ALERT_PHONE or _get_ops_setting("owner_alert_phone"))
+    if phone and VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_FROM_NUMBER:
+        try:
+            requests.post(
+                "https://rest.nexmo.com/sms/json",
+                data={
+                    "api_key": VONAGE_API_KEY,
+                    "api_secret": VONAGE_API_SECRET,
+                    "from": VONAGE_FROM_NUMBER,
+                    "to": phone,
+                    "text": text,
+                },
+                timeout=10,
+            )
+            print(f"ops_alert: larm-SMS skickat till ägare ({severity}: {title[:60]})")
+        except Exception as e:
+            print(f"ops_alert: SMS soft-fail: {e}")
+
+
+# Registrera larmkanalen i ops-agenten (P0/P1-incidenter + alert_operator går hit).
+ops_agent.set_alert_sender(_send_operator_alert)
 
 
 # Diamond Polish Fas 1: SMS i bakgrunden + alert vid fel (rate-limit per rest_id)
@@ -1972,7 +2215,8 @@ def _run_sms_and_alert_on_failure(
         print("⚠️  Background SMS: kunde inte bygga Order från dict: %s" % e)
         _send_sms_failure_alert(rest_id, order_dict.get("order_id", "?"), str(e))
         return
-    result = _send_sms_order_confirmation_result(order, customer_phone or "")
+    branding = _get_tenant_branding(rest_id)
+    result = _send_sms_order_confirmation_result(order, customer_phone or "", branding)
     if result["ok"]:
         _update_order_sms_status(db_order_id, order.order_id, "sent", result.get("to", ""), "")
         return
@@ -1996,7 +2240,7 @@ def _run_sms_and_alert_on_failure(
                 order_id=order.order_id,
                 db_order_id=db_order_id,
                 to_number=customer_phone or "",
-                body=_format_order_sms(order),
+                body=_format_order_sms(order, branding),
             )
         except Exception as e:
             print(f"⚠️  queue_sms_job after failure soft-fail: {e}")
@@ -2176,7 +2420,7 @@ async def match_menu(request: Request, rest_id: Optional[str] = None):
         if mt in ("exact", "alias", "fuzzy_auto"):
             item_id = m["itemId"]
             menu_item = find_menu_item(item_id, rest_id)
-            price = menu_item["price"] if menu_item else None
+            price = menu_item.get("price") if menu_item else None
             confidence = 1.0 if mt in ("exact", "alias") else round(m.get("score", 0.0), 4)
             matched.append({
                 "index": i,
@@ -2341,6 +2585,12 @@ def _cache_draft_for_call(
         "expires_at": exp_ts,
         "ts": time.time(),
     }
+    _persist_call_state(
+        call_id,
+        draft_token=draft_token,
+        payload_hash=payload_hash,
+        draft_expires_at=datetime.utcfromtimestamp(exp_ts).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+    )
     if len(_CALL_DRAFT_CACHE) > _CALL_CACHE_MAX_SIZE:
         now = time.time()
         expired = [k for k, v in _CALL_DRAFT_CACHE.items() if (now - v.get("ts", 0)) > _CALL_CACHE_TTL_SEC]
@@ -2350,17 +2600,47 @@ def _cache_draft_for_call(
 
 def _get_cached_draft_for_call(call_id: str) -> Optional[dict]:
     entry = _CALL_DRAFT_CACHE.get(str(call_id))
-    if not entry:
-        return None
-    if time.time() > float(entry.get("expires_at") or 0):
+    if entry and time.time() > float(entry.get("expires_at") or 0):
         del _CALL_DRAFT_CACHE[str(call_id)]
-        return None
-    return entry
+        entry = None
+    if entry:
+        return entry
+    # Efter omstart: försök återhämta draften från Supabase.
+    state = _load_call_state_from_db(call_id)
+    if state and state.get("draft_token") and state.get("payload_hash"):
+        exp_ts = None
+        raw_exp = state.get("draft_expires_at")
+        if raw_exp:
+            try:
+                exp_ts = datetime.fromisoformat(str(raw_exp).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                exp_ts = None
+        if exp_ts is None or time.time() <= exp_ts:
+            rehydrated = {
+                "draft_token": state["draft_token"],
+                "payload_hash": state["payload_hash"],
+                "readback": "",
+                "expires_at": exp_ts or (time.time() + confirmation.DRAFT_TTL_SECONDS),
+                "ts": time.time(),
+            }
+            _CALL_DRAFT_CACHE[str(call_id)] = rehydrated
+            print(f"call_state: draft återhämtad från DB för call_id={call_id}")
+            return rehydrated
+    return None
 
 
 def _clear_draft_cache_for_call(call_id: Optional[str]) -> None:
-    if call_id:
-        _CALL_DRAFT_CACHE.pop(str(call_id), None)
+    """Rensa draft ur minne OCH DB efter commit, så en förbrukad draft aldrig kan replayas efter omstart."""
+    if not call_id:
+        return
+    _CALL_DRAFT_CACHE.pop(str(call_id), None)
+    if _supabase_client:
+        try:
+            _supabase_client.table("call_state").update(
+                {"draft_token": None, "payload_hash": None, "draft_expires_at": None}
+            ).eq("call_id", str(call_id)).execute()
+        except Exception as e:
+            print(f"call_state: clear draft soft-fail: {e}")
 
 
 def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
@@ -2828,7 +3108,7 @@ def _process_place_order(
             id=item.id,
             name=name,
             quantity=item.quantity,
-            price=menu_item["price"],
+            price=menu_item.get("price"),
             special_requests=item.special_requests,
         ))
         if item.special_requests and item.special_requests.strip():
@@ -3107,6 +3387,7 @@ async def health_check():
     """Health check endpoint"""
     return JSONResponse(content={
         "status": "healthy",
+        "build": BUILD_TAG,
         "timestamp": datetime.now().isoformat(),
         "config": {
             "vapi_configured": bool(VAPI_API_KEY),
@@ -3131,6 +3412,71 @@ async def admin_invalidate_menu(request: Request, rest_id: Optional[str] = None)
         raise HTTPException(status_code=403, detail="Forbidden")
     _invalidate_menu_cache(rest_id.strip() if rest_id else None)
     return {"ok": True, "message": "Menu cache invalidated", "rest_id": rest_id or "(all)"}
+
+
+@app.post("/admin/menu/upload")
+async def admin_menu_upload(request: Request, rest_id: str):
+    """
+    Ladda upp/ersätt meny för en tenant i Supabase (tabellen menus).
+    Body = meny-JSON i samma format som menu.json (kategorier → listor av {id, name, ...}).
+    Kräver X-Admin-Key = ADMIN_SECRET. Validerar struktur innan skrivning och
+    invaliderar meny-cachen så ändringen slår igenom direkt.
+    """
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not _supabase_client:
+        raise HTTPException(status_code=503, detail="Supabase ej konfigurerad")
+    rest_id = rest_id.strip()
+    try:
+        menu_json = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ogiltig JSON-body")
+
+    # Strukturvalidering: minst en kategori-lista med dict-items som har unika int-id + namn.
+    if not isinstance(menu_json, dict):
+        raise HTTPException(status_code=400, detail="Menyn måste vara ett JSON-objekt med kategorier")
+    seen_ids: set = set()
+    item_count = 0
+    for cat_name, category in menu_json.items():
+        if not isinstance(category, list):
+            continue
+        for item in category:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=400, detail=f"Kategorin '{cat_name}' innehåller en post som inte är ett objekt")
+            item_id = item.get("id")
+            name = (item.get("name") or "").strip()
+            if not isinstance(item_id, int) or not name:
+                raise HTTPException(status_code=400, detail=f"Post i '{cat_name}' saknar int-id eller name: {item}")
+            if item_id in seen_ids:
+                raise HTTPException(status_code=400, detail=f"Duplicerat menyartikel-id: {item_id}")
+            seen_ids.add(item_id)
+            item_count += 1
+    if item_count == 0:
+        raise HTTPException(status_code=400, detail="Menyn innehåller inga artiklar")
+
+    _, rest_uuid = _resolve_restaurant_by_external_id(rest_id)
+    if not rest_uuid:
+        raise HTTPException(status_code=404, detail=f"Restaurang med external_id={rest_id} finns inte i Supabase")
+
+    try:
+        existing = _supabase_client.table("menus").select("version").eq("restaurant_uuid", rest_uuid).limit(1).execute()
+        rows = getattr(existing, "data", None) or []
+        new_version = (int(rows[0].get("version") or 0) + 1) if rows else 1
+        _supabase_client.table("menus").upsert(
+            {
+                "restaurant_uuid": rest_uuid,
+                "menu_json": menu_json,
+                "version": new_version,
+                "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            },
+            on_conflict="restaurant_uuid",
+        ).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Kunde inte spara meny: {e}")
+
+    _invalidate_menu_cache(rest_id)
+    return {"ok": True, "rest_id": rest_id, "items": item_count, "version": new_version}
 
 
 @app.post("/admin/tenants/{rest_id}/invalidate")

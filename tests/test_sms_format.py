@@ -62,3 +62,21 @@ def test_multiple_items_with_mixed_specials():
     assert "extra ost" in text
     assert "Hawaii: utan ananas" in text
     assert "2x Hawaii" in text
+
+
+def test_default_branding_is_gislegrillen():
+    """Utan branding: default = Gislegrillen + standardnummer (bakåtkompatibelt)."""
+    order = _order([M.OrderItem(id=1, name="Margherita", quantity=1, price=100.0)])
+    text = M._format_order_sms(order)
+    assert "från Gislegrillen." in text
+    assert "+46760445700" in text
+
+
+def test_per_tenant_branding_in_sms():
+    """Med branding för annan pizzeria: rätt namn och kontaktnummer, inte Gislegrillen."""
+    order = _order([M.OrderItem(id=1, name="Margherita", quantity=1, price=100.0)])
+    text = M._format_order_sms(order, {"name": "Pizzeria Roma", "contact_phone": "+46701112233"})
+    assert "från Pizzeria Roma." in text
+    assert "+46701112233" in text
+    assert "Gislegrillen" not in text
+    assert "+46760445700" not in text
