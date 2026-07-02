@@ -91,3 +91,43 @@ def test_queue_sms_job_uses_missing_phone_status_when_empty():
     rows = db.tables.get("sms_jobs", [])
     assert rows
     assert rows[0]["status"] == "missing_phone"
+
+
+def test_p1_incident_triggers_alert_sender():
+    """P0/P1-incidenter måste nå operatören via registrerad larmkanal."""
+    db = FakeSupabase()
+    delivered = []
+    ops_agent.set_alert_sender(lambda sev, title, body: delivered.append((sev, title, body)))
+    try:
+        ops_agent.create_incident(
+            db, incident_type="supabase_insert_failed", severity="P0",
+            summary="boom", restaurant_uuid="u", restaurant_id="r", human_required=True,
+        )
+        ops_agent.create_incident(
+            db, incident_type="info_only", severity="P2",
+            summary="minor", restaurant_uuid="u", restaurant_id="r",
+        )
+    finally:
+        ops_agent.set_alert_sender(None)
+    # Endast P0 ska ha larmats (P2 är för lågt).
+    assert len(delivered) == 1
+    assert delivered[0][0] == "P0"
+
+
+def test_alert_sender_soft_fails_and_never_raises():
+    """Om larmkanalen kastar fel får det ALDRIG bubbla upp i hot path."""
+    db = FakeSupabase()
+
+    def boom(sev, title, body):
+        raise RuntimeError("channel down")
+
+    ops_agent.set_alert_sender(boom)
+    try:
+        # Ska inte kasta trots att sender kraschar.
+        iid = ops_agent.create_incident(
+            db, incident_type="t", severity="P1", summary="x",
+            restaurant_uuid="u", restaurant_id="r",
+        )
+        assert iid
+    finally:
+        ops_agent.set_alert_sender(None)
