@@ -129,7 +129,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-07-02-autonomy-1"
+BUILD_TAG = "2026-07-02-autonomy-2"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -149,14 +149,30 @@ app.add_middleware(
 
 _VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
 
-# Effektiv webhook-hemlighet: env-variabel har företräde, annars laddas den EN gång
-# vid startup från ops_settings i Supabase (så hemligheten kan sättas utan Railway-
-# access). Laddas bara en gång → ingen DB-läsning på auth hot path. Om laddningen
-# misslyckas förblir den tom = öppet läge (ingen regression), och en varning loggas.
+# Effektiv webhook-hemlighet: env-variabel har företräde, annars laddas den från
+# ops_settings i Supabase (så hemligheten kan sättas utan Railway-access).
+# Laddas vid startup; om den läsningen misslyckades (transient DB-fel vid boot)
+# görs ett nytt försök max var 60:e sekund tills den finns – annars skulle
+# webhooken tyst stå öppen ända till nästa omstart. När hemligheten väl är satt
+# görs inga fler DB-läsningar på auth hot path.
 _EFFECTIVE_WEBHOOK_SECRET = WEBHOOK_SHARED_SECRET
+_WEBHOOK_SECRET_RETRY_COOLDOWN_SEC = 60
+_WEBHOOK_SECRET_LAST_ATTEMPT = 0.0
 
 
 def _get_effective_webhook_secret() -> str:
+    global _EFFECTIVE_WEBHOOK_SECRET, _WEBHOOK_SECRET_LAST_ATTEMPT
+    if _EFFECTIVE_WEBHOOK_SECRET:
+        return _EFFECTIVE_WEBHOOK_SECRET
+    now = time.time()
+    if _supabase_client and (now - _WEBHOOK_SECRET_LAST_ATTEMPT) >= _WEBHOOK_SECRET_RETRY_COOLDOWN_SEC:
+        _WEBHOOK_SECRET_LAST_ATTEMPT = now
+        # Tvinga färsk läsning (ops_settings-cachen kan hålla ett tomt resultat).
+        _OPS_SETTINGS_CACHE["ts"] = 0.0
+        db_secret = _get_ops_setting("webhook_shared_secret")
+        if db_secret:
+            _EFFECTIVE_WEBHOOK_SECRET = db_secret
+            print("✅ Webhook-hemlighet laddad från ops_settings (fördröjd retry).")
     return _EFFECTIVE_WEBHOOK_SECRET
 
 
@@ -2113,17 +2129,8 @@ def _get_ops_setting(key: str) -> str:
     return (_OPS_SETTINGS_CACHE["data"].get(key) or "").strip()
 
 
-def _send_operator_alert(severity: str, title: str, body: str) -> None:
-    """Leverera larm till plattformsägaren: SMS via Vonage + valfri webhook. Får aldrig raisa."""
-    now = time.time()
-    key = f"{severity}:{title[:80]}"
-    last = _OPERATOR_ALERT_LAST.get(key)
-    if last is not None and (now - last) < _OPERATOR_ALERT_MIN_INTERVAL_SEC:
-        print(f"ops_alert: undertryckt (rate limit) {key}")
-        return
-    _OPERATOR_ALERT_LAST[key] = now
-    text = f"{title}\n{body}".strip()[:500]
-
+def _deliver_operator_alert_blocking(severity: str, title: str, text: str) -> None:
+    """Själva leveransen (HTTP-anrop). Körs i bakgrundstråd – aldrig i hot path."""
     webhook_url = ALERT_WEBHOOK_URL or _get_ops_setting("alert_webhook_url")
     if webhook_url:
         try:
@@ -2148,6 +2155,32 @@ def _send_operator_alert(severity: str, title: str, body: str) -> None:
             print(f"ops_alert: larm-SMS skickat till ägare ({severity}: {title[:60]})")
         except Exception as e:
             print(f"ops_alert: SMS soft-fail: {e}")
+
+
+def _send_operator_alert(severity: str, title: str, body: str) -> None:
+    """
+    Leverera larm till plattformsägaren: SMS via Vonage + valfri webhook.
+    Incidenter kan skapas mitt i orderflödet, så HTTP-anropen (upp till ~18s
+    timeout) görs i en daemon-tråd – Vapi-svaret får aldrig vänta på ett larm.
+    Får aldrig raisa.
+    """
+    now = time.time()
+    key = f"{severity}:{title[:80]}"
+    last = _OPERATOR_ALERT_LAST.get(key)
+    if last is not None and (now - last) < _OPERATOR_ALERT_MIN_INTERVAL_SEC:
+        print(f"ops_alert: undertryckt (rate limit) {key}")
+        return
+    _OPERATOR_ALERT_LAST[key] = now
+    text = f"{title}\n{body}".strip()[:500]
+    try:
+        import threading
+        threading.Thread(
+            target=_deliver_operator_alert_blocking,
+            args=(severity, title, text),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        print(f"ops_alert: kunde inte starta larmtråd: {e}")
 
 
 # Registrera larmkanalen i ops-agenten (P0/P1-incidenter + alert_operator går hit).
@@ -3414,6 +3447,57 @@ async def admin_invalidate_menu(request: Request, rest_id: Optional[str] = None)
     return {"ok": True, "message": "Menu cache invalidated", "rest_id": rest_id or "(all)"}
 
 
+def _validate_menu_structure(menu_json: Any) -> Tuple[Optional[str], int]:
+    """
+    Validera meny-JSON (samma format som menu.json). Returnerar (felmeddelande, antal_artiklar).
+    felmeddelande=None betyder OK. Kräver unika int-id + namn på varje artikel.
+    """
+    if not isinstance(menu_json, dict):
+        return ("Menyn måste vara ett JSON-objekt med kategorier", 0)
+    seen_ids: set = set()
+    item_count = 0
+    for cat_name, category in menu_json.items():
+        if not isinstance(category, list):
+            continue
+        for item in category:
+            if not isinstance(item, dict):
+                return (f"Kategorin '{cat_name}' innehåller en post som inte är ett objekt", 0)
+            item_id = item.get("id")
+            name = (item.get("name") or "").strip()
+            if not isinstance(item_id, int) or not name:
+                return (f"Post i '{cat_name}' saknar int-id eller name: {item}", 0)
+            if item_id in seen_ids:
+                return (f"Duplicerat menyartikel-id: {item_id}", 0)
+            seen_ids.add(item_id)
+            item_count += 1
+    if item_count == 0:
+        return ("Menyn innehåller inga artiklar", 0)
+    return (None, item_count)
+
+
+def _save_menu_to_db(rest_uuid: str, menu_json: dict) -> int:
+    """Upserta meny för en tenant. Returnerar ny version. Raisar vid DB-fel."""
+    existing = _supabase_client.table("menus").select("version").eq("restaurant_uuid", rest_uuid).limit(1).execute()
+    rows = getattr(existing, "data", None) or []
+    new_version = (int(rows[0].get("version") or 0) + 1) if rows else 1
+    _supabase_client.table("menus").upsert(
+        {
+            "restaurant_uuid": rest_uuid,
+            "menu_json": menu_json,
+            "version": new_version,
+            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        },
+        on_conflict="restaurant_uuid",
+    ).execute()
+    return new_version
+
+
+def _check_admin_key(request: Request) -> None:
+    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 @app.post("/admin/menu/upload")
 async def admin_menu_upload(request: Request, rest_id: str):
     """
@@ -3422,9 +3506,7 @@ async def admin_menu_upload(request: Request, rest_id: str):
     Kräver X-Admin-Key = ADMIN_SECRET. Validerar struktur innan skrivning och
     invaliderar meny-cachen så ändringen slår igenom direkt.
     """
-    key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
-    if not ADMIN_SECRET or key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_admin_key(request)
     if not _supabase_client:
         raise HTTPException(status_code=503, detail="Supabase ej konfigurerad")
     rest_id = rest_id.strip()
@@ -3433,50 +3515,170 @@ async def admin_menu_upload(request: Request, rest_id: str):
     except Exception:
         raise HTTPException(status_code=400, detail="Ogiltig JSON-body")
 
-    # Strukturvalidering: minst en kategori-lista med dict-items som har unika int-id + namn.
-    if not isinstance(menu_json, dict):
-        raise HTTPException(status_code=400, detail="Menyn måste vara ett JSON-objekt med kategorier")
-    seen_ids: set = set()
-    item_count = 0
-    for cat_name, category in menu_json.items():
-        if not isinstance(category, list):
-            continue
-        for item in category:
-            if not isinstance(item, dict):
-                raise HTTPException(status_code=400, detail=f"Kategorin '{cat_name}' innehåller en post som inte är ett objekt")
-            item_id = item.get("id")
-            name = (item.get("name") or "").strip()
-            if not isinstance(item_id, int) or not name:
-                raise HTTPException(status_code=400, detail=f"Post i '{cat_name}' saknar int-id eller name: {item}")
-            if item_id in seen_ids:
-                raise HTTPException(status_code=400, detail=f"Duplicerat menyartikel-id: {item_id}")
-            seen_ids.add(item_id)
-            item_count += 1
-    if item_count == 0:
-        raise HTTPException(status_code=400, detail="Menyn innehåller inga artiklar")
+    err, item_count = _validate_menu_structure(menu_json)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
 
     _, rest_uuid = _resolve_restaurant_by_external_id(rest_id)
     if not rest_uuid:
         raise HTTPException(status_code=404, detail=f"Restaurang med external_id={rest_id} finns inte i Supabase")
 
     try:
-        existing = _supabase_client.table("menus").select("version").eq("restaurant_uuid", rest_uuid).limit(1).execute()
-        rows = getattr(existing, "data", None) or []
-        new_version = (int(rows[0].get("version") or 0) + 1) if rows else 1
-        _supabase_client.table("menus").upsert(
-            {
-                "restaurant_uuid": rest_uuid,
-                "menu_json": menu_json,
-                "version": new_version,
-                "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-            },
-            on_conflict="restaurant_uuid",
-        ).execute()
+        new_version = _save_menu_to_db(rest_uuid, menu_json)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Kunde inte spara meny: {e}")
 
     _invalidate_menu_cache(rest_id)
     return {"ok": True, "rest_id": rest_id, "items": item_count, "version": new_version}
+
+
+@app.post("/admin/tenants/onboard")
+async def admin_onboard_tenant(request: Request):
+    """
+    Onboarda en ny pizzeria i ETT anrop – helt utan deploy.
+    Body: {"external_id": "PizzeriaRoma_01", "name": "Pizzeria Roma",
+           "contact_phone": "+46701234567", "menu": {...valfri...}}
+    Skapar: rad i restaurants (egen UUID → total tenant-isolering), egen meny i menus,
+    tenant_health=open. Returnerar checklista med exakt Vapi-URL för tenanten.
+    Kräver X-Admin-Key.
+    """
+    _check_admin_key(request)
+    if not _supabase_client:
+        raise HTTPException(status_code=503, detail="Supabase ej konfigurerad")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ogiltig JSON-body")
+
+    external_id = (body.get("external_id") or "").strip()
+    name = (body.get("name") or "").strip()
+    contact_phone = (body.get("contact_phone") or "").strip()
+    menu_json = body.get("menu")
+
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9_\-]{3,64}", external_id):
+        raise HTTPException(status_code=400, detail="external_id måste vara 3-64 tecken (bokstäver/siffror/_/-), t.ex. PizzeriaRoma_01")
+    if not name:
+        raise HTTPException(status_code=400, detail="name krävs (visas i kundens SMS)")
+    if not contact_phone.startswith("+"):
+        raise HTTPException(status_code=400, detail="contact_phone krävs i internationellt format, t.ex. +46701234567")
+
+    menu_items = 0
+    if menu_json is not None:
+        err, menu_items = _validate_menu_structure(menu_json)
+        if err:
+            raise HTTPException(status_code=400, detail=f"Menyfel: {err}")
+
+    # Redan onboardad? Idempotent svar istället för dubblett.
+    existing = _supabase_client.table("restaurants").select("id").eq("external_id", external_id).is_("deleted_at", "null").limit(1).execute()
+    if getattr(existing, "data", None):
+        raise HTTPException(status_code=409, detail=f"external_id '{external_id}' finns redan. Använd /admin/menu/upload för menybyte.")
+
+    try:
+        ins = _supabase_client.table("restaurants").insert({
+            "external_id": external_id,
+            "name": name,
+            "contact_phone": contact_phone,
+        }).execute()
+        rest_uuid = str((getattr(ins, "data", None) or [{}])[0].get("id") or "")
+        if not rest_uuid:
+            raise RuntimeError("insert returnerade inget id")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Kunde inte skapa restaurang: {e}")
+
+    menu_version = None
+    if menu_json is not None:
+        try:
+            menu_version = _save_menu_to_db(rest_uuid, menu_json)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Restaurang skapad ({rest_uuid}) men menyn kunde inte sparas: {e}")
+
+    try:
+        ops_agent.upsert_tenant_health(
+            _supabase_client,
+            restaurant_uuid=rest_uuid,
+            restaurant_id=external_id,
+            intake_status="open",
+            intake_paused_reason="",
+        )
+    except Exception as e:
+        print(f"onboard: tenant_health soft-fail: {e}")
+
+    _invalidate_tenant_caches(external_id)
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "ok": True,
+        "rest_id": external_id,
+        "restaurant_uuid": rest_uuid,
+        "menu_items": menu_items,
+        "menu_version": menu_version,
+        "vapi_server_url": f"{base_url}/vapi/webhook?rest_id={external_id}",
+        "checklist": [
+            "1. Skapa Vapi-assistent med serverUrl ovan + header X-Webhook-Secret (scripts/onboard_pizzeria.py gör detta automatiskt)",
+            "2. Koppla pizzerians telefonnummer till assistenten i Vapi",
+            "3. Skapa Lovable-inloggning för pizzerian + rad i restaurant_members (se LOVABLE_SAKER_INLOGGNING.md)",
+            "4. Ladda upp meny via /admin/menu/upload om den inte skickades med här",
+            "5. Kör GET /admin/tenants/%s/preflight och verifiera att alla checkar är gröna" % external_id,
+        ],
+    }
+
+
+@app.get("/admin/tenants/{rest_id}/preflight")
+async def admin_tenant_preflight(rest_id: str, request: Request):
+    """
+    Go-live-kontroll för en tenant: allt som måste vara på plats innan pizzerian
+    tar riktiga samtal. Returnerar {ready: bool, checks: {...}}. Kräver X-Admin-Key.
+    """
+    _check_admin_key(request)
+    if not _supabase_client:
+        raise HTTPException(status_code=503, detail="Supabase ej konfigurerad")
+    rest_id = rest_id.strip()
+    checks: Dict[str, Any] = {}
+
+    rid, rest_uuid = _resolve_restaurant_by_external_id(rest_id)
+    checks["restaurant_exists"] = bool(rest_uuid)
+
+    branding_name, branding_phone = "", ""
+    if rest_uuid:
+        try:
+            r = _supabase_client.table("restaurants").select("name, contact_phone").eq("id", rest_uuid).limit(1).execute()
+            row = (getattr(r, "data", None) or [{}])[0]
+            branding_name = (row.get("name") or "").strip()
+            branding_phone = (row.get("contact_phone") or "").strip()
+        except Exception:
+            pass
+    checks["sms_branding_name"] = bool(branding_name)
+    checks["sms_branding_contact_phone"] = bool(branding_phone)
+
+    menu_items = 0
+    if rest_uuid:
+        db_menu = _load_menu_from_db(rest_id)
+        if db_menu:
+            menu_items = sum(len(v) for v in db_menu.values() if isinstance(v, list))
+    checks["menu_in_db"] = menu_items > 0
+    checks["menu_item_count"] = menu_items
+
+    intake_open = False
+    if rest_uuid:
+        try:
+            paused, _reason = ops_agent.is_intake_paused(_supabase_client, rest_uuid)
+            intake_open = not paused
+        except Exception:
+            intake_open = True  # saknad health-rad = inte pausad
+    checks["intake_open"] = intake_open
+
+    checks["webhook_secret_enforced"] = bool(_get_effective_webhook_secret())
+    checks["sms_gateway_configured"] = bool(VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_FROM_NUMBER)
+
+    # Egen menyfil/DB-meny → ingen tyst Gislegrillen-fallback för andra tenants.
+    if rest_id != DEFAULT_DASHBOARD_REST_ID:
+        checks["no_default_menu_fallback"] = checks["menu_in_db"]
+    else:
+        checks["no_default_menu_fallback"] = True
+
+    required = [k for k in checks if isinstance(checks[k], bool)]
+    ready = all(checks[k] for k in required)
+    return {"ready": ready, "rest_id": rest_id, "restaurant_uuid": rest_uuid, "checks": checks}
 
 
 @app.post("/admin/tenants/{rest_id}/invalidate")
