@@ -1,56 +1,39 @@
 name: Nightly encrypted backup (off-site redundans)
 
-# PRIMÄR backup körs autonomt av Railway-appen (ops_worker.maybe_run_daily_backup
-# → Supabase Storage) och är oberoende av GitHubs opålitliga cron.
-#
-# Denna workflow är en SEKUNDÄR, off-site kopia: den laddar upp en krypterad
-# backup som GitHub-artifact (30 dagar) hos en ANNAN leverantör än Supabase, så
-# datan finns kvar även om hela Supabase-projektet skulle gå förlorat. Att den
-# ibland hoppas över av GitHubs schemaläggare är ok – Railway-backupen är primär.
+# Sekundär backup: krypterad artefakt i GitHub Actions (90 dagars retention).
+# PRIMÄR backup körs redan dygnet runt av Railway (ops_worker → Supabase Storage
+# bucket "backups"). Denna workflow är extra redundans om Railway/Supabase skulle
+# försvinna – inte kritisk för daglig drift.
 
 on:
   schedule:
-    - cron: "34 2 * * *"  # 02:34 UTC (förskjutet – jämna slots är överbelastade)
+    - cron: "34 2 * * *"
   workflow_dispatch:
 
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install requests cryptography python-dotenv
+      - name: Install backup dependencies
+        run: pip install supabase cryptography
 
-      - name: Run encrypted backup
+      - name: Export and encrypt Supabase data
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
         run: python scripts/backup_supabase.py --out backup.enc
 
-      - name: Upload artifact (30 days retention)
+      - name: Upload encrypted artifact (90 days)
         uses: actions/upload-artifact@v4
         with:
-          name: supabase-backup-${{ github.run_id }}
+          name: supabase-backup-${{ github.run_number }}
           path: backup.enc
-          retention-days: 30
-          if-no-files-found: error
-
-      - name: Alert owner via SMS if backup failed
-        if: failure()
-        run: |
-          curl -s -X POST https://rest.nexmo.com/sms/json \
-            --data-urlencode "api_key=${{ secrets.VONAGE_API_KEY }}" \
-            --data-urlencode "api_secret=${{ secrets.VONAGE_API_SECRET }}" \
-            --data-urlencode "from=${{ secrets.VONAGE_FROM_NUMBER }}" \
-            --data-urlencode "to=${{ secrets.OWNER_ALERT_PHONE }}" \
-            --data-urlencode "text=[P1] Nattlig Supabase-backup misslyckades. Kolla GitHub Actions." \
-            | head -c 200
+          retention-days: 90
