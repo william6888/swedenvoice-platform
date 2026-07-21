@@ -65,6 +65,8 @@ def test_dashboard_login_sets_session_and_serves_html(monkeypatch):
                 "/dashboard/login", json={"key": "dashboard-test-key"}
             )
             assert login.status_code == 200
+            assert "HttpOnly" in login.headers["set-cookie"]
+            assert "Secure" in login.headers["set-cookie"]
             response = await client.get("/dashboard")
             assert response.status_code == 200
             assert "Gislegrillen" in response.text

@@ -84,6 +84,9 @@ ADMIN_SECRET = _clean_env_value("ADMIN_SECRET")
 # kan sättas, annars används ADMIN_SECRET så befintlig produktion fungerar utan
 # en ny Railway-variabel.
 DASHBOARD_ACCESS_KEY = _clean_env_value("DASHBOARD_ACCESS_KEY") or ADMIN_SECRET
+DASHBOARD_COOKIE_SECURE = (
+    _clean_env_value("DASHBOARD_COOKIE_SECURE", "true").lower() == "true"
+)
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in _clean_env_value("CORS_ALLOWED_ORIGINS").split(",")
@@ -3525,7 +3528,7 @@ async def dashboard_login(request: Request):
         _make_dashboard_session(),
         max_age=_DASHBOARD_SESSION_TTL_SEC,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=DASHBOARD_COOKIE_SECURE,
         samesite="strict",
         path="/",
     )
