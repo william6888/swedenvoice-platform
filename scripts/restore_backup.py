@@ -24,16 +24,14 @@ import os
 import sys
 from pathlib import Path
 
-import requests
+import httpx
 from cryptography.fernet import InvalidToken
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
+from env_loader import load_env_file
+
+load_env_file(ROOT / ".env")
 
 import backup_core
 
@@ -98,14 +96,14 @@ def restore_table(dump: dict, table: str) -> None:
     # Batcha i lagom bitar.
     for i in range(0, len(rows), 500):
         batch = rows[i : i + 500]
-        r = requests.post(
+        r = httpx.post(
             f"{SUPABASE_URL}/rest/v1/{table}",
             params={"on_conflict": key},
             headers=headers,
             json=batch,
             timeout=60,
         )
-        if not r.ok:
+        if not r.is_success:
             print(f"❌ Batch {i}-{i+len(batch)}: {r.status_code} {r.text[:300]}")
             sys.exit(1)
         try:

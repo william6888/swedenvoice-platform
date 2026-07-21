@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test: place_order med name+quantity (utan id). Verifierar att backend löser namn till id."""
 import sys
-import requests
+import httpx
 
 BASE = "http://localhost:8000"
 if len(sys.argv) > 1:
@@ -31,14 +31,14 @@ payload = {
 def main():
     print("📤 Webhook med items (name + quantity, inget id) →", URL)
     try:
-        r = requests.post(URL, json=payload, timeout=15)
+        r = httpx.post(URL, json=payload, timeout=15)
         print("Status:", r.status_code)
         print("Svar:", r.text[:600])
         if r.status_code == 200 and "success" in r.text.lower() and "error" not in r.text.lower():
             print("\n✅ Name→id fungerar. Order sparad med Vesuvio + Hawaii.")
         else:
             print("\n⚠️  Kolla svar (servern måste köra med senaste main.py).")
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print("❌ Servern svarar inte. Starta med: python3 main.py")
     except Exception as e:
         print("❌", e)

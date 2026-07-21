@@ -5,7 +5,7 @@ Skickar en beställning: 1x Pizza ID 1, kund Test Testsson, tel 0701234567.
 """
 
 import json
-import requests
+import httpx
 
 URL = "http://localhost:8000/vapi/webhook"
 
@@ -38,14 +38,14 @@ def main():
     print("   restaurant_id: Gislegrillen_01")
     print()
     try:
-        r = requests.post(URL, json=payload, timeout=10)
+        r = httpx.post(URL, json=payload, timeout=10)
         print(f"Status: {r.status_code}")
         print(f"Svar: {r.text[:500]}")
         if r.status_code == 200:
             print("\n✅ Test lyckades! Kolla orders.json, Supabase och serverloggar.")
         else:
             print("\n⚠️  Fick felstatus – kolla att servern körs på port 8000")
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print("❌ Kunde inte ansluta. Starta servern först:")
         print("   python3 main.py")
     except Exception as e:

@@ -29,16 +29,13 @@ import os
 import sys
 from pathlib import Path
 
-import requests
+import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from env_loader import load_env_file
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
+load_env_file(ROOT / ".env")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://web-production-a9a48.up.railway.app").rstrip("/")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
@@ -111,7 +108,7 @@ def main() -> None:
 
     # ---- 1. Onboard i backend/Supabase ----
     print(f"1/3 Onboardar {args.external_id} i {base} ...")
-    r = requests.post(
+    r = httpx.post(
         f"{base}/admin/tenants/onboard",
         headers=admin_headers,
         json={
@@ -124,15 +121,15 @@ def main() -> None:
     )
     if r.status_code == 409:
         print("   ℹ️  Tenanten finns redan – fortsätter med befintlig (menyn uppdateras separat).")
-        up = requests.post(
+        up = httpx.post(
             f"{base}/admin/menu/upload?rest_id={args.external_id}",
             headers=admin_headers, json=menu, timeout=30,
         )
-        if not up.ok:
+        if not up.is_success:
             fail(f"Menyuppdatering misslyckades: {up.status_code} {up.text[:300]}")
         print(f"   ✅ Meny uppdaterad (version {up.json().get('version')})")
         onboard = {"vapi_server_url": f"{base}/vapi/webhook?rest_id={args.external_id}"}
-    elif not r.ok:
+    elif not r.is_success:
         fail(f"Onboarding misslyckades: {r.status_code} {r.text[:300]}")
     else:
         onboard = r.json()
@@ -149,8 +146,8 @@ def main() -> None:
         vh = {"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"}
 
         print("2/3 Klonar Vapi-assistent ...")
-        tpl = requests.get(f"https://api.vapi.ai/assistant/{TEMPLATE_ASSISTANT_ID}", headers=vh, timeout=20)
-        if not tpl.ok:
+        tpl = httpx.get(f"https://api.vapi.ai/assistant/{TEMPLATE_ASSISTANT_ID}", headers=vh, timeout=20)
+        if not tpl.is_success:
             fail(f"Kunde inte läsa mall-assistenten: {tpl.status_code} {tpl.text[:200]}")
         template = tpl.json()
 
@@ -160,8 +157,8 @@ def main() -> None:
         place_order_schema = None
         keep_tool_ids = []
         for tid in tool_ids:
-            tr = requests.get(f"https://api.vapi.ai/tool/{tid}", headers=vh, timeout=20)
-            if not tr.ok:
+            tr = httpx.get(f"https://api.vapi.ai/tool/{tid}", headers=vh, timeout=20)
+            if not tr.is_success:
                 continue
             t = tr.json()
             if (t.get("function") or {}).get("name") == "place_order":
@@ -171,7 +168,7 @@ def main() -> None:
         if not place_order_schema:
             fail("Hittade ingen place_order-tool på mall-assistenten")
 
-        nt = requests.post(
+        nt = httpx.post(
             "https://api.vapi.ai/tool", headers=vh, timeout=20,
             json={
                 "type": "function",
@@ -179,7 +176,7 @@ def main() -> None:
                 "server": {"url": vapi_server_url, "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET}},
             },
         )
-        if not nt.ok:
+        if not nt.is_success:
             fail(f"Kunde inte skapa place_order-tool: {nt.status_code} {nt.text[:300]}")
         new_tool_id = nt.json()["id"]
         print(f"   ✅ place_order-tool skapad: {new_tool_id}")
@@ -200,8 +197,8 @@ def main() -> None:
             if template.get(k) is not None:
                 payload[k] = template[k]
 
-        na = requests.post("https://api.vapi.ai/assistant", headers=vh, json=payload, timeout=30)
-        if not na.ok:
+        na = httpx.post("https://api.vapi.ai/assistant", headers=vh, json=payload, timeout=30)
+        if not na.is_success:
             fail(f"Kunde inte skapa assistent: {na.status_code} {na.text[:400]}")
         assistant_id = na.json()["id"]
         print(f"   ✅ Assistent skapad: {assistant_id} ('{args.name} AI')")
@@ -211,11 +208,11 @@ def main() -> None:
 
     # ---- 3. Preflight ----
     print("3/3 Preflight-kontroll ...")
-    pf = requests.get(
+    pf = httpx.get(
         f"{base}/admin/tenants/{args.external_id}/preflight",
         headers={"X-Admin-Key": ADMIN_SECRET}, timeout=20,
     )
-    if not pf.ok:
+    if not pf.is_success:
         fail(f"Preflight misslyckades: {pf.status_code} {pf.text[:300]}")
     result = pf.json()
     for check, value in result["checks"].items():

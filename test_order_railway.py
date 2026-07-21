@@ -5,13 +5,12 @@ Uppdatera RAILWAY_URL nedan om du har annan URL.
 """
 import json
 import os
-import requests
+from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+import httpx
+from env_loader import load_env_file
+
+load_env_file(Path(__file__).resolve().parent / ".env")
 
 RAILWAY_URL = "https://web-production-a9a48.up.railway.app"
 # Tenant-blind: lägg till ?rest_id=Gislegrillen_01 (eller annat external_id) för multi-tenant-test
@@ -45,7 +44,7 @@ def main():
         headers["X-Webhook-Secret"] = secret
         print("   (använder WEBHOOK_SHARED_SECRET från miljö)")
     try:
-        r = requests.post(URL, json=payload, headers=headers, timeout=15)
+        r = httpx.post(URL, json=payload, headers=headers, timeout=15)
         print(f"Status: {r.status_code}")
         print(f"Svar: {r.text[:600]}")
         if r.status_code == 200:

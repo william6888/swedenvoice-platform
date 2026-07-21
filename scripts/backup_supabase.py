@@ -24,11 +24,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
+from env_loader import load_env_file
+
+load_env_file(ROOT / ".env")
 
 import backup_core
 
