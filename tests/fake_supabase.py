@@ -87,6 +87,10 @@ class _Query:
         self._filters.append(lambda r, c=col, v=val: (r.get(c) is not None) and (r.get(c) < v))
         return self
 
+    def gt(self, col: str, val: Any):
+        self._filters.append(lambda r, c=col, v=val: (r.get(c) is not None) and (r.get(c) > v))
+        return self
+
     # ----- exec -----
     def execute(self) -> _Result:
         with self._db._lock:

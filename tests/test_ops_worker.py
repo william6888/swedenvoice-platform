@@ -143,6 +143,7 @@ def test_daily_backup_runs_once_per_day():
     res1 = ops_worker.maybe_run_daily_backup(db, encryption_key=key)
     assert res1["ran"] is True
     assert res1["ok"] is True
+    assert res1["verified"] is True
 
     # Filen finns i storage och kan dekrypteras tillbaka.
     files = list(db.storage.buckets.get("backups", {}).keys())
@@ -150,10 +151,13 @@ def test_daily_backup_runs_once_per_day():
     blob = db.storage.from_("backups").download(files[0])
     dump = backup_core.decrypt_blob(blob, key)
     assert "orders" in dump["tables"]
+    assert dump["format_version"] == backup_core.FORMAT_VERSION
 
     # Andra körningen samma dag ska hoppa över.
     res2 = ops_worker.maybe_run_daily_backup(db, encryption_key=key)
     assert res2["ran"] is False
+    assert res2["ok"] is True
+    assert res2["reason"] == "already_completed"
 
 
 def test_daily_backup_skips_without_key():
@@ -161,7 +165,28 @@ def test_daily_backup_skips_without_key():
     db = FakeSupabase()
     res = ops_worker.maybe_run_daily_backup(db, encryption_key=None)
     assert res["ran"] is False
+    assert res["ok"] is False
+    assert res["error"] == "backup_encryption_key_missing"
     assert "backups" not in db.storage.buckets
+
+
+def test_daily_backup_does_not_mark_incomplete_export_as_success():
+    """Ett enda tabellfel ska stoppa backup och lämna dagsmarkören orörd."""
+    from cryptography.fernet import Fernet
+
+    db = FakeSupabase()
+    db.simulate_missing_table["orders"] = True
+    res = ops_worker.maybe_run_daily_backup(
+        db, encryption_key=Fernet.generate_key().decode()
+    )
+
+    assert res["ran"] is True
+    assert res["ok"] is False
+    assert "orders" in res["error"]
+    assert not any(
+        row.get("key") == "last_backup_date"
+        for row in db.tables.get("ops_settings", [])
+    )
 
 
 def test_auto_resolve_stale_incidents_keeps_p0_p1():

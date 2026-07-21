@@ -1,10 +1,11 @@
 name: Production watchdog
 
 # Extern övervakning som inte bor i samma process/server som appen:
-#  1. Pingar /health var 15:e minut (3 försök).
-#  2. Om nere: SMS till plattformsägaren via Vonage.
-#  3. Om uppe: kör en backup-ops-tick (/admin/ops/run) ifall den inbyggda
-#     bakgrundsloopen skulle ha dött – dubbel självläkning.
+#  1. Pingar /health (3 försök).
+#  2. Om nere: workflowen misslyckas och GitHub skickar sitt kostnadsfria
+#     workflow-failure-mail. Inget trasigt SMS-steg som påstår att larm skickats.
+#  3. Om uppe: kör och validerar /admin/ops/run. Den inbyggda Railway-loopen är
+#     primär; GitHub cron kan försenas eller hoppas över på gratisnivån.
 
 on:
   schedule:
@@ -12,6 +13,13 @@ on:
     # på jämna slots och hoppar/försenar körningar där.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-watchdog
+  cancel-in-progress: false
 
 env:
   HEALTH_URL: https://web-production-a9a48.up.railway.app/health
@@ -27,8 +35,9 @@ jobs:
         run: |
           ok=0
           for i in 1 2 3; do
-            code=$(curl -s -o /tmp/health.json -w "%{http_code}" --max-time 15 "$HEALTH_URL" || echo "000")
-            if [ "$code" = "200" ] && grep -q '"healthy"' /tmp/health.json; then
+            code=$(curl -sS -o /tmp/health.json -w "%{http_code}" --max-time 15 "$HEALTH_URL") || code="000"
+            healthy=$(python3 -c 'import json,sys; print(1 if json.load(open(sys.argv[1])).get("status") == "healthy" else 0)' /tmp/health.json 2>/dev/null || echo 0)
+            if [ "$code" = "200" ] && [ "$healthy" = "1" ]; then
               ok=1; break
             fi
             echo "Attempt $i failed (HTTP $code). Retrying in 20s..."
@@ -36,22 +45,31 @@ jobs:
           done
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
-      - name: Alert owner via SMS if down
+      - name: Fail and notify through GitHub if down
         if: steps.health.outputs.ok != '1'
         run: |
-          curl -s -X POST https://rest.nexmo.com/sms/json \
-            --data-urlencode "api_key=${{ secrets.VONAGE_API_KEY }}" \
-            --data-urlencode "api_secret=${{ secrets.VONAGE_API_SECRET }}" \
-            --data-urlencode "from=${{ secrets.VONAGE_FROM_NUMBER }}" \
-            --data-urlencode "to=${{ secrets.OWNER_ALERT_PHONE }}" \
-            --data-urlencode "text=[P0] Ordersystemet svarar inte pa /health. Kolla Railway: web-production-a9a48" \
-            | head -c 300
-          echo "Health check FAILED – alert sent"
+          echo "::error title=Production health check failed::Ordersystemet svarar inte efter tre försök. Kontrollera Railway."
           exit 1
 
-      - name: Backup ops tick (self-healing redundancy)
+      - name: Run and validate ops tick
         if: steps.health.outputs.ok == '1'
         run: |
-          curl -s -X POST --max-time 60 \
+          code=$(curl -sS -o /tmp/ops.json -w "%{http_code}" -X POST --max-time 60 \
             -H "X-Admin-Key: ${{ secrets.ADMIN_SECRET }}" \
-            "$OPS_RUN_URL" | head -c 500 || echo "(ops tick skipped – non-fatal)"
+            "$OPS_RUN_URL") || code="000"
+          if [ "$code" != "200" ]; then
+            echo "::error title=Ops tick failed::/admin/ops/run returned HTTP $code"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          data = json.load(open("/tmp/ops.json"))
+          backup = data.get("summary", {}).get("backup", {})
+          if data.get("ok") is not True or backup.get("ok") is not True:
+              raise SystemExit("Ops tick or backup health was not OK")
+          print(json.dumps({
+              "ok": True,
+              "duration_sec": data["summary"].get("duration_sec"),
+              "backup": backup,
+          }, ensure_ascii=False))
+          PY

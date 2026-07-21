@@ -6,7 +6,7 @@ A production-ready, plug-and-play Voice AI ordering system for Gislegrillen pizz
 
 - **Voice AI Integration**: Seamless integration with Vapi.ai for natural phone conversations
 - **Swedish AI Personality**: Professional Swedish-speaking AI with local pizzeria authenticity
-- **Smart Order Processing**: Automatic price calculation, validation, and persistence
+- **Smart Order Processing**: Menu validation, tenant isolation and persistence without prices
 - **Kitchen Dashboard**: Real-time web dashboard for managing orders
 - **Kitchen visibility**: Dashboard, Supabase/Lovable, and console/Railway logs for kitchen tickets
 - **Production Ready**: Comprehensive error handling, logging, and monitoring
@@ -17,10 +17,11 @@ A production-ready, plug-and-play Voice AI ordering system for Gislegrillen pizz
 gislegrillen-order-system/
 ├── main.py                 # FastAPI server with all endpoints
 ├── menu.json              # Complete menu database (pizzas 1-52, kebabs, burgers, sides)
-├── orders.json            # Persistent order storage
+├── backup_core.py         # Strict encrypted Supabase backup + verification
 ├── system_prompt.md       # Swedish AI personality instructions
 ├── index.html             # Kitchen dashboard (Bootstrap)
 ├── requirements.txt       # Python dependencies
+├── requirements-backup.txt # Pinned GitHub backup dependencies
 ├── .env.template          # Environment variables template
 ├── .gitignore            # Git ignore rules
 └── README.md             # This file
@@ -30,7 +31,7 @@ gislegrillen-order-system/
 
 ### 1. Prerequisites
 
-- Python 3.8+
+- Python 3.11
 - Vapi.ai account (https://vapi.ai)
 - Optional: Vonage for SMS, Supabase for cloud orders (see `.env.template`)
 
@@ -173,35 +174,14 @@ Access the dashboard at: `http://localhost:8000/dashboard`
 3. **AI confirms** → Customer approves order
 4. **AI calls tool** → `place_order` endpoint triggered
 5. **Backend processes:**
-   - Calculates total price
-   - Saves to orders.json
+   - Validates items against the tenant's menu
+   - Saves to Supabase (system of record)
    - Prints kitchen ticket to console / logs
-   - Optionally inserts to Supabase and sends SMS (Vonage) when configured
+   - Sends SMS (Vonage) when configured
 6. **AI confirms** → "Tack för din beställning! Den är klar om 15 minuter."
 7. **Kitchen staff** → Views order on dashboard, marks as ready
 
-## 📝 Example Order
-
-**Console Output (Kitchen Ticket):**
-```
-============================================================
-                    🔔 KÖKS-BONG! 🔔                        
-============================================================
-ORDER ID: ORD-20260208153045
-TID: 2026-02-08 15:30:45
-------------------------------------------------------------
-ARTIKLAR:
-  [1x] Hawaii (98 kr)
-  [1x] Kebabpizza (110 kr)
-  [1x] Coca-Cola 33cl (25 kr)
-------------------------------------------------------------
-⚠️  SPECIAL: Kebabpizza utan lök
-------------------------------------------------------------
-TOTALT: 233 kr
-============================================================
-STATUS: PENDING
-============================================================
-```
+Systemet hanterar medvetet **inga priser**. Betalning sker på plats.
 
 ## 🛠️ Development
 
@@ -217,7 +197,6 @@ Edit `menu.json` and add items to the appropriate category:
 {
   "id": 53,
   "name": "New Pizza",
-  "price": 120,
   "description": "Tomatsås, ost, toppings"
 }
 ```
@@ -251,9 +230,8 @@ The system logs important events to console:
 - Check port 8000 is available
 
 **Orders not appearing:**
-- Check `orders.json` permissions
-- Verify API endpoint is accessible
-- Check browser console for errors
+- Verify `/health`, Supabase and the `/orders` endpoint
+- Check the Lovable/KDS connection and browser console
 
 **Vapi tool not working:**
 - Verify server URL is correct and accessible

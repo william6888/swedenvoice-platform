@@ -340,8 +340,12 @@ def maybe_run_daily_backup(
     aldrig backar upp flera gånger samma dag. Soft-fail överallt – en misslyckad
     backup får aldrig störa övrig drift.
     """
-    summary: Dict[str, Any] = {"ran": False}
-    if not supabase_client or not encryption_key:
+    summary: Dict[str, Any] = {"ran": False, "ok": False}
+    if not supabase_client:
+        summary["error"] = "supabase_not_configured"
+        return summary
+    if not encryption_key:
+        summary["error"] = "backup_encryption_key_missing"
         return summary
     today = datetime.utcnow().strftime("%Y-%m-%d")
     try:
@@ -354,22 +358,24 @@ def maybe_run_daily_backup(
         )
         rows = getattr(resp, "data", None) or []
         if rows and (rows[0].get("value") or "") == today:
-            return summary  # redan gjort idag
+            return {"ran": False, "ok": True, "reason": "already_completed"}
     except Exception as e:
         print(f"ops_worker: last_backup_date read soft-fail: {e}")
 
+    summary["ran"] = True
     try:
         import backup_core
 
         result = backup_core.run_backup_to_storage(supabase_client, encryption_key, date_str=today)
-        summary.update({"ran": True, **result})
         supabase_client.table("ops_settings").upsert(
             {"key": "last_backup_date", "value": today, "updated_at": _now_iso()},
             on_conflict="key",
         ).execute()
+        summary.update(result)
         print(f"ops_worker: daglig backup klar {result}")
     except Exception as e:
         print(f"ops_worker: daily backup soft-fail: {e}")
+        summary["ok"] = False
         summary["error"] = str(e)
     return summary
 
