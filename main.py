@@ -129,7 +129,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-07-02-autonomy-3"
+BUILD_TAG = "2026-07-21-backup-integrity-1"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -3429,6 +3429,8 @@ async def health_check():
             "vonage_sms_configured": bool(VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_FROM_NUMBER),
             "sms_tracking_enabled": True,
             "vonage_request_encoding": "form_urlencoded",
+            "backup_encryption_configured": bool(_clean_env_value("BACKUP_ENCRYPTION_KEY")),
+            "ops_agent_enabled": bool(OPS_AGENT_ENABLED),
         }
     })
 
@@ -3729,14 +3731,22 @@ def _sms_sender_for_worker(to_number: str, body: str) -> Dict[str, Any]:
 @app.post("/admin/ops/run")
 async def admin_ops_run(request: Request):
     """
-    Kör en ops-tick: SMS retries, tenant health reconciliation, idempotency cleanup.
-    Tänkt att triggas av Railway cron (var 60–120 sek) eller manuellt.
+    Kör en ops-tick: SMS-retries, tenant-health, städning och verifierad dagsbackup.
+    Den synkrona nätverksdelen körs i en tråd så /health och ordertrafik inte blockeras.
     Kräver X-Admin-Key = ADMIN_SECRET.
     """
     key = request.headers.get("X-Admin-Key") or request.query_params.get("admin_key") or ""
     if not ADMIN_SECRET or key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
-    summary = ops_worker.run_tick(_supabase_client, sms_sender=_sms_sender_for_worker)
+    import asyncio as _asyncio
+    summary = await _asyncio.to_thread(
+        ops_worker.run_tick,
+        _supabase_client,
+        sms_sender=_sms_sender_for_worker,
+        backup_encryption_key=_clean_env_value("BACKUP_ENCRYPTION_KEY") or None,
+    )
+    if not summary.get("backup", {}).get("ok"):
+        return JSONResponse(status_code=503, content={"ok": False, "summary": summary})
     return {"ok": True, "summary": summary}
 
 

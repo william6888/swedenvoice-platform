@@ -37,14 +37,16 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **order_integrity.py** | Pure-funktioner: canonical payload, payload_hash, idempotency-key, validering. |
 | **order_service.py** | Supabase-lager: `idempotency_records`, `order_events`, tenant-scopad fetch/update av `orders`. Soft-fail om migration saknas. |
 | **ops_agent.py** | Policy-styrd autonom drift: `incidents`, `ops_actions`, `tenant_health` pausa/återuppta, `queue_sms_job`, `alert_operator`. Bara säkra åtgärder. Larmkanal injiceras av main.py. |
-| **ops_worker.py** | `run_tick`: SMS-retry, dead-letter, tenant_health-reconcile, idempotency-cleanup, auto-resolve gamla P2/P3-incidenter, `call_state`-cleanup. |
+| **ops_worker.py** | `run_tick`: SMS-retry, dead-letter, tenant_health-reconcile, idempotency-cleanup, auto-resolve gamla P2/P3-incidenter, `call_state`-cleanup och verifierad dagsbackup. |
+| **backup_core.py** | Fail-closed export av 13 tabeller, keyset-paginering, manifest, Fernet-kryptering och upload→download-verifiering. Ett enda tabellfel stoppar hela backupen. |
+| **scripts/backup_supabase.py / restore_backup.py** | Skapar/verifierar backup respektive inspekterar eller återställer en explicit tabell. Gamla format-v1-filer stöds. |
 | **confirmation.py** | HMAC-signerade draft-tokens + verbal readback (TTL 5 min). |
 | **menu_match.py** | Menymatchning (id/exact/alias/fuzzy) mot tenantens meny. |
 | **index.html** | Köksdashboard (XSS-säker), läser via `/orders`. |
 | **menu.json** | Gislegrillens meny (kategorier → listor med `id`, `name`, `aliases`, `description`). Inga priser. `_meta` = referensdata (modifierare/gluten). |
 | **system_prompt.md** | AI-personlighet/flöde för Vapi (opt-in-modifierare, äta här/ta med, inga priser). ID-kartan matchar `menu.json`. |
 | **test_system.py** | Röktest som CI kör (inga externa tjänster). |
-| **tests/** | Pytest-svit (109 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, ops_agent, ops_worker, sms-format, m.m. |
+| **tests/** | Pytest-svit (119 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, ops_agent, ops_worker, backup/restore, sms-format, m.m. |
 | **scripts/onboard_pizzeria.py** | Onboarda ny pizzeria i ett kommando (backend + Vapi-assistentkloning + preflight). |
 | **scripts/** | Övriga hjälpskript: `go_live_verify.py`, `generate_secrets.py`, `setup_webhook_auth.py`, `set_railway_vonage_vars.py`, `smoke_test_fas2.py`. |
 
@@ -54,10 +56,11 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 |-----|------|
 | **Procfile / railway.json / runtime.txt / .python-version** | Railway-bygge (Python 3.11, uvicorn, `/health`-healthcheck). |
 | **.github/workflows/python-checks.yml** | CI: compileall + `test_system.py` + `pytest tests`. |
-| **.github/workflows/watchdog.yml** | Extern watchdog var 15 min: pingar `/health`, SMS vid nere, backup-ops-tick. |
+| **.github/workflows/watchdog.yml** | Extern gratis-watchdog: pingar `/health`, validerar `/admin/ops/run` och misslyckas med GitHub-mail vid verkligt fel. Schemat begär var 15:e minut men GitHub free kan försena/hoppa över körningar; Railway-loopen är primär. |
+| **.github/workflows/backup.yml** | Sekundär off-site-backup i GitHub Artifact (90 dagar). Skapar, dekrypterar och strukturvaliderar filen före upload. |
 | **.github/workflows/trufflehog.yml** | Secret-scanning. |
-| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. |
-| **`supabase_*.sql`** | Historik över DB-migrationer (schema-referens). |
+| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `BACKUP_ENCRYPTION_KEY`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. |
+| **`supabase_*.sql`, `supabase/migrations/`** | Historik över DB-migrationer och deployade säkerhetsändringar. |
 
 ## Dokumentation
 
@@ -74,9 +77,9 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 
 ## Supabase-tabeller (viktigast)
 
-- **orders** – ordrar (system of record för KDS). RLS: `member_select_orders` / `member_update_orders` (via `restaurant_members`). Anon-läsning borttagen; Lovable läser via edge-funktioner med service_role.
+- **orders** – ordrar (system of record för KDS). RLS: `member_select_orders` / `member_update_orders` (via `restaurant_members`). **`anon_select_on_orders` finns fortfarande medvetet** eftersom nuvarande Lovable-dashboard använder anon; ta inte bort den förrän stegen i `LOVABLE_SAKER_INLOGGNING.md` är genomförda.
 - **restaurants** – tenants (`external_id`, `name`, `contact_phone`, throttle, `deleted_at`).
-- **restaurant_members** – kopplar `auth.users` → `restaurant_id` för inloggad KDS.
+- **restaurant_members** – kopplar `auth.users` → `restaurant_id` för inloggad KDS. Klienter får bara läsa sitt eget medlemskap; INSERT/UPDATE/DELETE görs med betrodd service-role så användaren inte kan välja tenant själv.
 - **menus** – per-tenant meny (`restaurant_uuid` → `menu_json`, `version`). Backend läser härifrån före fil.
 - **call_state** – samtalstillstånd (call_id → tenant/telefon/draft) så pågående samtal överlever deploy.
 - **ops_settings** – plattformsinställningar (`owner_alert_phone`, `webhook_shared_secret`, `alert_webhook_url`).

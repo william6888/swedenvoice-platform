@@ -19,7 +19,7 @@ Användning:
 import argparse
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,21 +54,34 @@ def main() -> None:
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     dump = backup_core.export_all_tables(client)
-    total = sum(len(v) for v in dump["tables"].values())
-    for table, rows in dump["tables"].items():
-        print(f"  ✅ {table}: {len(rows)} rader")
+    row_counts = backup_core.validate_dump(dump)
+    total = sum(row_counts.values())
+    for table in backup_core.TABLES:
+        print(f"  ✅ {table}: {row_counts[table]} rader")
 
     blob = backup_core.build_encrypted_blob(dump, BACKUP_KEY)
-    out = args.out or f"backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.enc"
-    Path(out).write_bytes(blob)
-    print(f"\n🔒 Krypterad backup: {out} ({len(blob)} bytes, {total} rader, {len(dump['tables'])} tabeller)")
+    # Självtesta hela kryptering/dekryptering innan filen publiceras.
+    backup_core.decrypt_blob(blob, BACKUP_KEY)
+
+    out = args.out or f"backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.enc"
+    out_path = Path(out)
+    temp_path = out_path.with_name(f".{out_path.name}.tmp")
+    try:
+        temp_path.write_bytes(blob)
+        temp_path.replace(out_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    print(
+        f"\n🔒 Krypterad och verifierad backup: {out_path} "
+        f"({len(blob)} bytes, {total} rader, {len(row_counts)} tabeller)"
+    )
 
     if args.to_storage:
-        try:
-            res = backup_core.run_backup_to_storage(client, BACKUP_KEY)
-            print(f"☁️  Uppladdad till Supabase Storage: {res['path']}")
-        except Exception as e:
-            print(f"⚠️  Storage-uppladdning misslyckades: {e}")
+        storage_path = f"backup_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.enc"
+        backup_core.upload_verified_blob(
+            client, blob, BACKUP_KEY, path=storage_path
+        )
+        print(f"☁️  Uppladdad och återläst från Supabase Storage: {storage_path}")
 
 
 if __name__ == "__main__":
