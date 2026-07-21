@@ -130,6 +130,11 @@ Add a server tool:
 
 Access the dashboard at: `http://localhost:8000/dashboard`
 
+Dashboarden kräver inloggning. Ange `DASHBOARD_ACCESS_KEY` (eller
+`ADMIN_SECRET` om separat dashboardnyckel inte är satt); servern skapar därefter
+en tidsbegränsad HttpOnly-session. `/orders` och `/update_order_status` är inte
+publika API:er.
+
 **Features:**
 - Real-time order display
 - Order status management (Pending → Ready → Completed)
@@ -144,9 +149,9 @@ Access the dashboard at: `http://localhost:8000/dashboard`
 - `GET /` - API information
 - `GET /menu` - Get full menu (cached 3 min; clear with `POST /admin/menu/invalidate` if you change menu.json)
 - `GET /api/keywords` - Keywords/keyterms for speech recognition (sanitized, max 50 chars)
-- `GET /orders` - Get all orders
+- `GET /orders` - Get tenant-scoped orders (dashboard authentication required)
 - `POST /place_order` - Place new order (called by Vapi)
-- `POST /update_order_status` - Update order status
+- `POST /update_order_status` - Update tenant-scoped order status (dashboard authentication required)
 - `GET /dashboard` - Kitchen dashboard
 - `GET /system_prompt` - Get system prompt
 - `GET /health` - Health check

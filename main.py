@@ -5,6 +5,7 @@ FastAPI backend for Vapi.ai voice order integration
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -79,6 +80,15 @@ HOST = _clean_env_value("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 # Fas 1 Safety Net: admin-endpoint
 ADMIN_SECRET = _clean_env_value("ADMIN_SECRET")
+# Lokal köksdashboard använder en signerad HttpOnly-session. En separat nyckel
+# kan sättas, annars används ADMIN_SECRET så befintlig produktion fungerar utan
+# en ny Railway-variabel.
+DASHBOARD_ACCESS_KEY = _clean_env_value("DASHBOARD_ACCESS_KEY") or ADMIN_SECRET
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in _clean_env_value("CORS_ALLOWED_ORIGINS").split(",")
+    if origin.strip()
+]
 # Valfritt: delad hemlighet för Vapi → POST /place_order och /vapi/webhook. Om tom: ingen kontroll (bakåtkompatibelt).
 # I Vapi: Custom header "X-Webhook-Secret: <samma värde>" ELLER Authorization: Bearer <samma värde>
 WEBHOOK_SHARED_SECRET = _clean_env_value("WEBHOOK_SHARED_SECRET")
@@ -129,7 +139,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-07-21-backup-integrity-1"
+BUILD_TAG = "2026-07-21-api-security-2"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -138,16 +148,77 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware for dashboard
+# Dashboarden är same-origin. Cross-origin browseråtkomst är stängd som
+# standard och kan öppnas explicit med CORS_ALLOWED_ORIGINS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Admin-Key",
+        "X-Dashboard-Key",
+        "X-Webhook-Secret",
+    ],
 )
 
 _VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
+_DASHBOARD_COOKIE_NAME = "gisle_dashboard_session"
+_DASHBOARD_SESSION_TTL_SEC = 12 * 60 * 60
+
+
+def _make_dashboard_session(now: Optional[int] = None) -> str:
+    if not DASHBOARD_ACCESS_KEY:
+        raise RuntimeError("DASHBOARD_ACCESS_KEY/ADMIN_SECRET saknas")
+    expires = int(now if now is not None else time.time()) + _DASHBOARD_SESSION_TTL_SEC
+    payload = str(expires)
+    signature = hmac.new(
+        DASHBOARD_ACCESS_KEY.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _valid_dashboard_session(token: str, now: Optional[int] = None) -> bool:
+    if not token or not DASHBOARD_ACCESS_KEY:
+        return False
+    try:
+        expires_text, signature = token.split(".", 1)
+        expires = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    expected = hmac.new(
+        DASHBOARD_ACCESS_KEY.encode("utf-8"),
+        expires_text.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    current = int(now if now is not None else time.time())
+    return expires >= current and hmac.compare_digest(signature, expected)
+
+
+def _dashboard_authorized(request: Request) -> bool:
+    supplied = (
+        request.headers.get("X-Dashboard-Key")
+        or request.headers.get("X-Admin-Key")
+        or ""
+    ).strip()
+    if (
+        supplied
+        and DASHBOARD_ACCESS_KEY
+        and hmac.compare_digest(supplied, DASHBOARD_ACCESS_KEY)
+    ):
+        return True
+    return _valid_dashboard_session(
+        request.cookies.get(_DASHBOARD_COOKIE_NAME, "")
+    )
+
+
+def _require_dashboard_access(request: Request) -> None:
+    if not _dashboard_authorized(request):
+        raise HTTPException(status_code=401, detail="Dashboard authentication required")
 
 # Effektiv webhook-hemlighet: env-variabel har företräde, annars laddas den från
 # ops_settings i Supabase (så hemligheten kan sättas utan Railway-access).
@@ -383,21 +454,18 @@ def _parse_items_from_params(params: dict, rest_id: Optional[str] = None) -> lis
     return out
 
 def load_menu(rest_id: Optional[str] = None) -> dict:
-    """Load menu: rest_id=None eller Gislegrillen_01 → menu.json. Annars menu_{rest_id}.json, fallback menu.json. Ingen blandning mellan pizzerior."""
+    """Load menu: default-tenant → menu.json, annan tenant → endast egen fil."""
     empty = {"pizzas": [], "kebabs": [], "burgers": [], "sides": [], "drinks": []}
     if not rest_id or rest_id.strip() == "Gislegrillen_01":
         path = MENU_FILE
     else:
         path = BASE_DIR / ("menu_%s.json" % rest_id.strip())
         if not path.exists():
-            # MULTI-TENANT-VARNING: en annan pizzeria utan egen menyfil får annars
-            # tyst Gislegrillens meny → fel rätter kan tas emot. Logga högt så det
-            # upptäcks direkt vid onboarding istället för i produktion.
             print(
-                "⚠️  [ALERT] menu_%s.json saknas – faller tillbaka till standardmenyn (menu.json). "
-                "Skapa en egen menyfil för denna pizzeria innan go-live!" % rest_id.strip()
+                "❌ [TENANT] menu_%s.json saknas – vägrar använda en annan "
+                "pizzerias standardmeny." % rest_id.strip()
             )
-            path = MENU_FILE
+            return empty
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -1829,9 +1897,11 @@ def _encrypt_tenant_config(plain_dict: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) -> Tuple[str, Optional[str]]:
+def _get_restaurant_from_webhook(
+    body: dict, request: Optional[Request] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """Multi-tenant: hämta rest_id från query (rest_id) eller body, slå upp i Supabase restaurants.
-    Returnerar (restaurant_id, restaurant_uuid). Om lookup misslyckas: (rest_id, RESTAURANT_UUID)."""
+    Returnerar (restaurant_id, restaurant_uuid). Okänd explicit tenant nekas."""
     rest_id = None
     if request:
         rest_id = request.query_params.get("rest_id")
@@ -1852,12 +1922,14 @@ def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) 
             if r.data and len(r.data) > 0:
                 row = r.data[0]
                 return (row["external_id"], str(row["id"]))
+            return (None, None)
         except Exception:
             try:
                 r = _supabase_client.table("restaurants").select("id, external_id").eq("external_id", rest_id).limit(1).execute()
                 if r.data and len(r.data) > 0:
                     row = r.data[0]
                     return (row["external_id"], str(row["id"]))
+                return (None, None)
             except Exception as e:
                 print(f"⚠️  Restaurant lookup failed for rest_id={rest_id}: {e}")
     # Fallback: RESTAURANT_UUID (Gislegrillens UUID i env) får ENDAST användas för
@@ -1865,7 +1937,7 @@ def _get_restaurant_from_webhook(body: dict, request: Optional[Request] = None) 
     # Gislegrillens UUID och hamna i fel kök.
     if rest_id == DEFAULT_DASHBOARD_REST_ID:
         return (rest_id, RESTAURANT_UUID)
-    return (rest_id, None)
+    return (None, None)
 
 
 def _refresh_active_tenant_set() -> None:
@@ -2007,7 +2079,14 @@ def _resolve_restaurant_by_external_id(rest_id: str) -> Tuple[Optional[str], Opt
     if not _supabase_client:
         return (rid, None)
     try:
-        resp = _supabase_client.table("restaurants").select("external_id, id").eq("external_id", rid).limit(1).execute()
+        resp = (
+            _supabase_client.table("restaurants")
+            .select("external_id, id")
+            .eq("external_id", rid)
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
         rows = getattr(resp, "data", None) or []
         if rows:
             ext = rows[0].get("external_id") or rid
@@ -2015,7 +2094,21 @@ def _resolve_restaurant_by_external_id(rest_id: str) -> Tuple[Optional[str], Opt
             return (ext, str(uuid_val) if uuid_val else None)
     except Exception as e:
         print(f"⚠️  _resolve_restaurant_by_external_id fail: {e}")
-    return (rid, None)
+    return (None, None)
+
+
+def _require_known_tenant(rest_id: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    Returnera canonical external_id + UUID. I produktion med Supabase är en
+    okänd/soft-deletad tenant alltid 404; ingen defaultmeny eller oskopad data.
+    """
+    effective = (rest_id or DEFAULT_DASHBOARD_REST_ID or "").strip()
+    if not effective:
+        raise HTTPException(status_code=400, detail="rest_id saknas")
+    resolved_id, restaurant_uuid = _resolve_restaurant_by_external_id(effective)
+    if _supabase_client and (not resolved_id or not restaurant_uuid):
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    return (resolved_id or effective, restaurant_uuid)
 
 
 def _get_restaurant_config_cached(body: dict, request: Optional[Request]) -> Tuple[Optional[str], Optional[str]]:
@@ -2409,15 +2502,18 @@ async def root():
 
 @app.get("/menu")
 async def get_menu(rest_id: Optional[str] = None):
-    """Get full menu (cached 3 min). Optional rest_id for future per-tenant menu."""
-    menu = get_menu_cached(rest_id)
+    """Get tenant menu. Explicit unknown tenants never receive the default menu."""
+    effective_rest_id, _ = _require_known_tenant(rest_id)
+    menu = get_menu_cached(effective_rest_id)
+    if not menu_match.menu_has_items(menu):
+        raise HTTPException(status_code=503, detail="Tenant menu is not configured")
     return JSONResponse(content=menu)
 
 
 @app.post("/match_menu")
 async def match_menu(request: Request, rest_id: Optional[str] = None):
     """Read-only menu matching. Validates item names against the menu without creating an order."""
-    rest_id = (rest_id or "").strip() or "Gislegrillen_01"
+    rest_id, _ = _require_known_tenant(rest_id)
     body = await request.json()
     raw_items = body.get("items")
     if not isinstance(raw_items, list) or len(raw_items) == 0:
@@ -2453,15 +2549,12 @@ async def match_menu(request: Request, rest_id: Optional[str] = None):
 
         if mt in ("exact", "alias", "fuzzy_auto"):
             item_id = m["itemId"]
-            menu_item = find_menu_item(item_id, rest_id)
-            price = menu_item.get("price") if menu_item else None
             confidence = 1.0 if mt in ("exact", "alias") else round(m.get("score", 0.0), 4)
             matched.append({
                 "index": i,
                 "input": name_in,
                 "menuId": item_id,
                 "menuName": m["canonicalName"],
-                "price": price,
                 "matchType": mt,
                 "confidence": confidence,
             })
@@ -2516,7 +2609,8 @@ async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100
         "tillägg",
     }
 
-    menu = get_menu_cached(rest_id)
+    effective_rest_id, _ = _require_known_tenant(rest_id)
+    menu = get_menu_cached(effective_rest_id)
     keyterms_set = set()
     words_set = set()
     for category in menu.values():
@@ -2554,7 +2648,7 @@ async def get_keywords(rest_id: Optional[str] = None, limit: Optional[int] = 100
     return JSONResponse(content={"keywords": keywords, "keyterms": keyterms})
 
 @app.get("/orders")
-async def get_orders(rest_id: Optional[str] = None):
+async def get_orders(request: Request, rest_id: Optional[str] = None):
     """
     Visa ordrar för en tenant.
 
@@ -2562,17 +2656,13 @@ async def get_orders(rest_id: Optional[str] = None):
     ägaren aldrig hamnar i ett split brain-scenario där lokal dashboard visar
     annan data än Lovable.
 
-    Vid Supabase-fel: vi loggar incident och faller tillbaka till orders.json
-    så det lokala köks-skärmflödet inte dör mitt i en lunchrush.
+    Kräver signerad dashboard-session eller X-Dashboard-Key/X-Admin-Key.
+    I produktion failar läsningen stängt vid Supabase-fel; en oskopad lokal
+    fallback får aldrig exponera andra tenants ordrar.
     """
-    rest_id_q = (rest_id or DEFAULT_DASHBOARD_REST_ID or "").strip()
+    _require_dashboard_access(request)
+    rest_id_q, rest_uuid = _require_known_tenant(rest_id)
     if DASHBOARD_FROM_DB and _supabase_client:
-        rest_uuid: Optional[str] = None
-        try:
-            if rest_id_q:
-                _, rest_uuid = _resolve_restaurant_by_external_id(rest_id_q)
-        except Exception:
-            rest_uuid = None
         rows, err = order_service.fetch_orders(
             _supabase_client,
             restaurant_uuid=rest_uuid,
@@ -2582,19 +2672,24 @@ async def get_orders(rest_id: Optional[str] = None):
         if rows is not None:
             return JSONResponse(content=[order_service.shape_order_for_dashboard(r) for r in rows])
         if err:
-            print(f"⚠️  /orders Supabase fail (fallback till orders.json): {err}")
+            print(f"⚠️  /orders Supabase fail (fail-closed): {err}")
             ops_agent.create_incident(
                 _supabase_client,
                 incident_type="dashboard_supabase_read_failed",
                 severity="P2",
-                summary="Lokal dashboard kunde inte läsa ordrar från Supabase – fallback till orders.json.",
+                summary="Lokal dashboard kunde inte läsa tenant-skopade ordrar från Supabase.",
                 restaurant_uuid=rest_uuid,
                 restaurant_id=rest_id_q,
                 details={"error": err[:500]},
             )
+            raise HTTPException(status_code=503, detail="Order storage unavailable")
     # Fallback / utvecklingsläge.
     orders = load_orders()
-    return JSONResponse(content=orders)
+    scoped = [
+        order for order in orders
+        if (order.get("restaurant_id") or DEFAULT_DASHBOARD_REST_ID) == rest_id_q
+    ]
+    return JSONResponse(content=scoped)
 
 def _cache_draft_for_call(
     call_id: str,
@@ -3325,21 +3420,21 @@ async def place_order(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/update_order_status")
-async def update_order_status(request: UpdateOrderStatusRequest, rest_id: Optional[str] = None):
+async def update_order_status(
+    request: UpdateOrderStatusRequest,
+    http_request: Request,
+    rest_id: Optional[str] = None,
+):
     """
     Uppdatera orderstatus. Pydantic har redan validerat att status är tillåten.
 
-    Default-källa: Supabase. Detta gör att samma update slår igenom mot Lovable/KDS.
-    Vi uppdaterar även orders.json som backup.
+    Kräver signerad dashboard-session eller X-Dashboard-Key/X-Admin-Key.
+    Produktion uppdaterar endast tenant-skopad Supabase-data och rapporterar
+    aldrig lokal fallback som framgång.
     """
     try:
-        rest_id_q = (rest_id or DEFAULT_DASHBOARD_REST_ID or "").strip()
-        rest_uuid: Optional[str] = None
-        if rest_id_q:
-            try:
-                _, rest_uuid = _resolve_restaurant_by_external_id(rest_id_q)
-            except Exception:
-                rest_uuid = None
+        _require_dashboard_access(http_request)
+        rest_id_q, rest_uuid = _require_known_tenant(rest_id)
 
         db_ok = False
         db_err: Optional[str] = None
@@ -3364,20 +3459,26 @@ async def update_order_status(request: UpdateOrderStatusRequest, rest_id: Option
             else:
                 print(f"⚠️  /update_order_status Supabase fail: {db_err}")
 
-        orders = load_orders()
-        order_found = False
-        for order in orders:
-            if order.get("order_id") == request.order_id:
-                order["status"] = request.status
-                order_found = True
-                break
-        if order_found:
+            if not db_ok:
+                status_code = 404 if db_err == "not_found_or_rls" else 503
+                detail = "Order not found" if status_code == 404 else "Order storage unavailable"
+                raise HTTPException(status_code=status_code, detail=detail)
+        else:
+            orders = load_orders()
+            order_found = False
+            for order in orders:
+                same_tenant = (
+                    order.get("restaurant_id") or DEFAULT_DASHBOARD_REST_ID
+                ) == rest_id_q
+                if same_tenant and order.get("order_id") == request.order_id:
+                    order["status"] = request.status
+                    order_found = True
+                    break
+            if not order_found:
+                raise HTTPException(status_code=404, detail="Order not found")
             save_orders(orders)
 
-        if not db_ok and not order_found:
-            raise HTTPException(status_code=404, detail="Order not found")
-
-        print(f"✅ Order {request.order_id} status -> {request.status} (db_ok={db_ok}, json_ok={order_found})")
+        print(f"✅ Order {request.order_id} status -> {request.status} (db_ok={db_ok})")
         return JSONResponse(content={
             "success": True,
             "message": f"Order status updated to {request.status}",
@@ -3390,9 +3491,59 @@ async def update_order_status(request: UpdateOrderStatusRequest, rest_id: Option
         print(f"❌ Error updating order status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+def _dashboard_login_page() -> str:
+    return """<!doctype html>
+<html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Köksdashboard – inloggning</title>
+<style>body{font-family:system-ui;max-width:420px;margin:12vh auto;padding:24px}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px}#error{color:#b00020}</style>
+</head><body><h1>Köksdashboard</h1><p>Ange dashboardnyckeln för att fortsätta.</p>
+<input id="key" type="password" autocomplete="current-password" autofocus>
+<button id="login">Logga in</button><p id="error"></p>
+<script>
+document.getElementById('login').onclick=async()=>{
+  const response=await fetch('/dashboard/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:document.getElementById('key').value})});
+  if(response.ok){location.reload()}else{document.getElementById('error').textContent='Fel nyckel'}
+};
+</script></body></html>"""
+
+
+@app.post("/dashboard/login")
+async def dashboard_login(request: Request):
+    if not DASHBOARD_ACCESS_KEY:
+        raise HTTPException(status_code=503, detail="Dashboard authentication is not configured")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    supplied = str(body.get("key") or "")
+    if not hmac.compare_digest(supplied, DASHBOARD_ACCESS_KEY):
+        raise HTTPException(status_code=401, detail="Invalid dashboard key")
+    response = JSONResponse(content={"ok": True})
+    response.set_cookie(
+        _DASHBOARD_COOKIE_NAME,
+        _make_dashboard_session(),
+        max_age=_DASHBOARD_SESSION_TTL_SEC,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/dashboard/logout")
+async def dashboard_logout():
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(_DASHBOARD_COOKIE_NAME, path="/")
+    return response
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
+async def dashboard(request: Request):
     """Serve kitchen dashboard HTML"""
+    if not _dashboard_authorized(request):
+        return HTMLResponse(content=_dashboard_login_page(), status_code=401)
     dashboard_file = BASE_DIR / "index.html"
     try:
         with open(dashboard_file, 'r', encoding='utf-8') as f:

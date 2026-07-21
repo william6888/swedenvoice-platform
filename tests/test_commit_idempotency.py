@@ -26,6 +26,17 @@ def _reset_main(tmp_path, monkeypatch):
     monkeypatch.setattr(M, "_supabase_client", db)
     monkeypatch.setattr(M, "ORDER_REQUIRE_DB_COMMIT", True)
     monkeypatch.setattr(M, "RESTAURANT_UUID", "u-rest-1")
+    db.tables["restaurants"] = [
+        {"id": "u-rest-1", "external_id": "rest-1", "deleted_at": None}
+    ]
+    db.tables["menus"] = [
+        {
+            "restaurant_uuid": "u-rest-1",
+            "menu_json": M.load_menu(None),
+            "version": 1,
+        }
+    ]
+    M._MENU_CACHE.clear()
     orders_file = tmp_path / "orders.json"
     monkeypatch.setattr(M, "ORDERS_FILE", orders_file)
     M.save_orders([])
@@ -182,10 +193,22 @@ def test_dashboard_reads_from_supabase_not_orders_json(_reset_main, monkeypatch)
     db = _reset_main
     _commit(db)
     monkeypatch.setattr(M, "DASHBOARD_FROM_DB", True)
+    monkeypatch.setattr(M, "DASHBOARD_ACCESS_KEY", "dashboard-test-key")
     monkeypatch.setattr(M, "_resolve_restaurant_by_external_id",
                         lambda rid: ("rest-1", "u-rest-1"))
     import asyncio
-    resp = asyncio.run(M.get_orders(rest_id="rest-1"))
+    from starlette.requests import Request
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/orders",
+        "query_string": b"",
+        "headers": [(b"x-dashboard-key", b"dashboard-test-key")],
+        "scheme": "https",
+        "server": ("testserver", 443),
+        "client": ("127.0.0.1", 1234),
+    }
+    resp = asyncio.run(M.get_orders(Request(scope), rest_id="rest-1"))
     body = resp.body.decode("utf-8")
     assert "ORD-" in body
     # orders.json är tom – data kom från Supabase.

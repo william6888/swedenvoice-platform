@@ -33,7 +33,7 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 
 | Fil | Roll |
 |-----|------|
-| **main.py** | FastAPI-app. Webhook `/vapi/webhook`, `/place_order`, `/draft_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/system_prompt`, `/health` (visar `build`-tagg). Admin: `/admin/ops/run`, `/admin/menu/upload`, `/admin/tenants/onboard`, `/admin/tenants/{rest_id}/preflight`. Larmkanal (`_send_operator_alert`, i tråd), samtalstillstånd i `call_state`, webhook-secret från env eller `ops_settings`. |
+| **main.py** | FastAPI-app. Webhook `/vapi/webhook`, `/place_order`, `/draft_order`, `/orders`, `/menu`, `/update_order_status`, `/dashboard`, `/system_prompt`, `/health` (visar `build`-tagg). Lokal `/dashboard`, `/orders` och statusändring kräver signerad HttpOnly-session via `/dashboard/login` (nyckel `DASHBOARD_ACCESS_KEY`, fallback `ADMIN_SECRET`). Okända tenants failar stängt och får aldrig defaultmeny. Admin: `/admin/ops/run`, `/admin/menu/upload`, `/admin/tenants/onboard`, `/admin/tenants/{rest_id}/preflight`. |
 | **order_integrity.py** | Pure-funktioner: canonical payload, payload_hash, idempotency-key, validering. |
 | **order_service.py** | Supabase-lager: `idempotency_records`, `order_events`, tenant-scopad fetch/update av `orders`. Soft-fail om migration saknas. |
 | **ops_agent.py** | Policy-styrd autonom drift: `incidents`, `ops_actions`, `tenant_health` pausa/återuppta, `queue_sms_job`, `alert_operator`. Bara säkra åtgärder. Larmkanal injiceras av main.py. |
@@ -46,7 +46,7 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **menu.json** | Gislegrillens meny (kategorier → listor med `id`, `name`, `aliases`, `description`). Inga priser. `_meta` = referensdata (modifierare/gluten). |
 | **system_prompt.md** | AI-personlighet/flöde för Vapi (opt-in-modifierare, äta här/ta med, inga priser). ID-kartan matchar `menu.json`. |
 | **test_system.py** | Röktest som CI kör (inga externa tjänster). |
-| **tests/** | Pytest-svit (119 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, ops_agent, ops_worker, backup/restore, sms-format, m.m. |
+| **tests/** | Pytest-svit (126 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, API/tenant-auth, ops_agent, ops_worker, backup/restore, sms-format, m.m. |
 | **scripts/onboard_pizzeria.py** | Onboarda ny pizzeria i ett kommando (backend + Vapi-assistentkloning + preflight). |
 | **scripts/** | Övriga hjälpskript: `go_live_verify.py`, `generate_secrets.py`, `setup_webhook_auth.py`, `set_railway_vonage_vars.py`, `smoke_test_fas2.py`. |
 
@@ -59,7 +59,7 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **.github/workflows/watchdog.yml** | Extern gratis-watchdog: pingar `/health`, validerar `/admin/ops/run` och misslyckas med GitHub-mail vid verkligt fel. Schemat begär var 15:e minut men GitHub free kan försena/hoppa över körningar; Railway-loopen är primär. |
 | **.github/workflows/backup.yml** | Sekundär off-site-backup i GitHub Artifact (90 dagar). Skapar, dekrypterar och strukturvaliderar filen före upload. |
 | **.github/workflows/trufflehog.yml** | Secret-scanning. |
-| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `BACKUP_ENCRYPTION_KEY`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. |
+| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, valfri `DASHBOARD_ACCESS_KEY`, `CORS_ALLOWED_ORIGINS`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `BACKUP_ENCRYPTION_KEY`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. |
 | **`supabase_*.sql`, `supabase/migrations/`** | Historik över DB-migrationer och deployade säkerhetsändringar. |
 
 ## Dokumentation

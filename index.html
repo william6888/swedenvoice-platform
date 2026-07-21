@@ -264,6 +264,9 @@
                     <button class="btn btn-primary btn-lg" onclick="loadOrders()">
                         <i class="bi bi-arrow-clockwise"></i> Uppdatera
                     </button>
+                    <button class="btn btn-outline-secondary btn-lg" onclick="logoutDashboard()">
+                        <i class="bi bi-box-arrow-right"></i> Logga ut
+                    </button>
                 </div>
             </div>
         </div>
@@ -412,7 +415,6 @@
                         <span class="item-name">${escapeHtml(item.name)}</span>
                         ${item.special_requests ? `<small class="text-muted d-block"><em>${escapeHtml(item.special_requests)}</em></small>` : ''}
                     </div>
-                    <span class="item-price">${escapeHtml(item.price !== null && item.price !== undefined ? item.price : '')} kr</span>
                 </div>
             `).join('');
 
@@ -450,11 +452,6 @@
                     </div>
 
                     ${specialRequestsHtml}
-
-                    <div class="order-total">
-                        <span class="total-label">Totalt:</span>
-                        <span class="total-amount">${escapeHtml(order.total_price)} kr</span>
-                    </div>
 
                     ${actionButton}
                 </div>
@@ -506,6 +503,11 @@
                 console.error('Error updating order:', error);
                 alert('Fel vid uppdatering av beställning');
             }
+        }
+
+        async function logoutDashboard() {
+            await fetch(`${API_BASE}/dashboard/logout`, { method: 'POST' });
+            window.location.reload();
         }
         
         // Initialize
