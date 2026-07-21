@@ -20,20 +20,20 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
-import requests
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from dotenv import load_dotenv
+from env_loader import load_env_file
 import uvicorn
 
 # Load .env från samma mapp som main.py (så ADMIN_SECRET m.m. hittas oavsett arbetskatalog)
 _env_path = Path(__file__).resolve().parent / ".env"
-_load_ok = load_dotenv(dotenv_path=str(_env_path))
+_load_ok = load_env_file(_env_path)
 if not _load_ok:
-    load_dotenv()
+    load_env_file(Path.cwd() / ".env")
 # Fallback: om ADMIN_SECRET fortfarande saknas (t.ex. dotenv-parsefel), läs raden direkt från .env
 if not os.getenv("ADMIN_SECRET") and _env_path.exists():
     try:
@@ -1504,9 +1504,9 @@ def _send_sms_order_confirmation_result(order: Order, to_number: str, branding: 
     print(f"DEBUG SMS: Vonage config OK, calling API for to_number={to_number}")
     text = _format_order_sms(order, branding)
     try:
-        r = requests.post(
+        r = httpx.post(
             "https://rest.nexmo.com/sms/json",
-            # requests encodes this as application/x-www-form-urlencoded, including
+            # httpx encodes this as application/x-www-form-urlencoded, including
             # special characters in credentials/text required by Vonage's stricter parser.
             data={
                 "api_key": VONAGE_API_KEY,
@@ -1635,7 +1635,7 @@ def _fetch_vapi_call_record(call_id: str) -> Optional[dict]:
     if not call_id or not VAPI_API_KEY:
         return None
     try:
-        r = requests.get(
+        r = httpx.get(
             f"https://api.vapi.ai/call/{call_id}",
             headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
             timeout=8,
@@ -2231,14 +2231,14 @@ def _deliver_operator_alert_blocking(severity: str, title: str, text: str) -> No
     webhook_url = ALERT_WEBHOOK_URL or _get_ops_setting("alert_webhook_url")
     if webhook_url:
         try:
-            requests.post(webhook_url, json={"text": text}, timeout=8)
+            httpx.post(webhook_url, json={"text": text}, timeout=8)
         except Exception as e:
             print(f"ops_alert: webhook soft-fail: {e}")
 
     phone = _normalize_phone_for_sms(OWNER_ALERT_PHONE or _get_ops_setting("owner_alert_phone"))
     if phone and VONAGE_API_KEY and VONAGE_API_SECRET and VONAGE_FROM_NUMBER:
         try:
-            requests.post(
+            httpx.post(
                 "https://rest.nexmo.com/sms/json",
                 data={
                     "api_key": VONAGE_API_KEY,
@@ -3861,7 +3861,7 @@ def _sms_sender_for_worker(to_number: str, body: str) -> Dict[str, Any]:
     if not VONAGE_API_KEY or not VONAGE_API_SECRET or not VONAGE_FROM_NUMBER:
         return {"ok": False, "error": "vonage_not_configured"}
     try:
-        r = requests.post(
+        r = httpx.post(
             "https://rest.nexmo.com/sms/json",
             data={
                 "api_key": VONAGE_API_KEY,

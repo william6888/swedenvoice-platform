@@ -46,7 +46,8 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **menu.json** | Gislegrillens meny (kategorier → listor med `id`, `name`, `aliases`, `description`). Inga priser. `_meta` = referensdata (modifierare/gluten). |
 | **system_prompt.md** | AI-personlighet/flöde för Vapi (opt-in-modifierare, äta här/ta med, inga priser). ID-kartan matchar `menu.json`. |
 | **test_system.py** | Röktest som CI kör (inga externa tjänster). |
-| **tests/** | Pytest-svit (126 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, API/tenant-auth, ops_agent, ops_worker, backup/restore, sms-format, m.m. |
+| **env_loader.py** | Minimal read-only `.env`-läsare. Ersätter `python-dotenv` så runtime inte har dess muterande `set_key`-yta. |
+| **tests/** | Pytest-svit (129 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, API/tenant-auth, env-loader, ops_agent, ops_worker, backup/restore, sms-format, m.m. Testerna isolerar alltid live-Supabase. |
 | **scripts/onboard_pizzeria.py** | Onboarda ny pizzeria i ett kommando (backend + Vapi-assistentkloning + preflight). |
 | **scripts/** | Övriga hjälpskript: `go_live_verify.py`, `generate_secrets.py`, `setup_webhook_auth.py`, `set_railway_vonage_vars.py`, `smoke_test_fas2.py`. |
 
@@ -59,7 +60,7 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **.github/workflows/watchdog.yml** | Extern gratis-watchdog: pingar `/health`, validerar `/admin/ops/run` och misslyckas med GitHub-mail vid verkligt fel. Schemat begär var 15:e minut men GitHub free kan försena/hoppa över körningar; Railway-loopen är primär. |
 | **.github/workflows/backup.yml** | Sekundär off-site-backup i GitHub Artifact (90 dagar). Skapar, dekrypterar och strukturvaliderar filen före upload. |
 | **.github/workflows/trufflehog.yml** | Secret-scanning. |
-| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, valfri `DASHBOARD_ACCESS_KEY`, `CORS_ALLOWED_ORIGINS`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `BACKUP_ENCRYPTION_KEY`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. |
+| **.env / .env.template** | Nycklar: `VAPI_API_KEY`, `VONAGE_*`, `SUPABASE_URL/KEY` (service_role), `ADMIN_SECRET`, valfri `DASHBOARD_ACCESS_KEY`, `CORS_ALLOWED_ORIGINS`, `WEBHOOK_SHARED_SECRET`, `DRAFT_SIGNING_SECRET`, `ENCRYPTION_SECRET`, `BACKUP_ENCRYPTION_KEY`, `RESTAURANT_UUID`, ops-flaggor. `.env` committas aldrig. HTTP-klient är `httpx`; `requests`/`python-dotenv` är borttagna ur manifests. |
 | **`supabase_*.sql`, `supabase/migrations/`** | Historik över DB-migrationer och deployade säkerhetsändringar. |
 
 ## Dokumentation

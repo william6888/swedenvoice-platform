@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Smoke-test för Fas 2: meny-cache och GET /api/keywords.
-Använder requests (ingen TestClient). Kör mot localhost eller Railway.
+Använder httpx (ingen TestClient). Kör mot localhost eller Railway.
 
   python3 scripts/smoke_test_fas2.py
   python3 scripts/smoke_test_fas2.py https://web-production-xxxx.up.railway.app
 """
 import sys
-import requests
+import httpx
 
 DEFAULT_BASE = "http://localhost:8000"
 
@@ -21,7 +21,7 @@ def main():
 
     # GET /menu
     try:
-        r = requests.get("%s/menu" % base, timeout=5)
+        r = httpx.get("%s/menu" % base, timeout=5)
         if r.status_code != 200:
             print("  FAIL GET /menu: status %s" % r.status_code)
             ok = False
@@ -32,7 +32,7 @@ def main():
                 ok = False
             else:
                 print("  OK  GET /menu (%d pizzor)" % len(j["pizzas"]))
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print("  SKIP GET /menu: servern svarar inte (starta med python3 main.py)")
         connection_errors += 1
     except Exception as e:
@@ -41,7 +41,7 @@ def main():
 
     # GET /api/keywords
     try:
-        r = requests.get("%s/api/keywords" % base, timeout=5)
+        r = httpx.get("%s/api/keywords" % base, timeout=5)
         if r.status_code != 200:
             print("  FAIL GET /api/keywords: status %s" % r.status_code)
             if r.status_code == 404:
@@ -54,7 +54,7 @@ def main():
                 ok = False
             else:
                 print("  OK  GET /api/keywords (%d keywords, %d keyterms)" % (len(j["keywords"]), len(j["keyterms"])))
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print("  SKIP GET /api/keywords: servern svarar inte")
         connection_errors += 1
     except Exception as e:

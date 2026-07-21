@@ -9,12 +9,14 @@ import os
 import sys
 import json
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from env_loader import load_env_file
 
 ENDPOINT = "https://backboard.railway.com/graphql/v2"
 def get_vars():
-    from pathlib import Path
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent.parent / ".env")
+    load_env_file(Path(__file__).parent.parent / ".env")
     return {
         "VONAGE_API_KEY": os.environ.get("VONAGE_API_KEY", ""),
         "VONAGE_API_SECRET": os.environ.get("VONAGE_API_SECRET", ""),

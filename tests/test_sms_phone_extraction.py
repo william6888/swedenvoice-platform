@@ -8,6 +8,17 @@ import main
 
 
 class TestCustomerPhoneExtraction(unittest.TestCase):
+    def setUp(self):
+        # Enhetstester får aldrig ärva live-klienten från main.py/.env och skriva
+        # call_state till produktion.
+        self._original_supabase = main._supabase_client
+        main._supabase_client = None
+        main._CALL_CUSTOMER_PHONE_CACHE.clear()
+
+    def tearDown(self):
+        main._CALL_CUSTOMER_PHONE_CACHE.clear()
+        main._supabase_client = self._original_supabase
+
     def test_env_values_are_trimmed_for_strict_api_auth(self):
         self.assertEqual(main._clean_env_value("__MISSING_TEST_ENV__", " fallback\t"), "fallback")
 

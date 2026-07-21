@@ -7,7 +7,7 @@ Kräver att servern körs. Valfritt: skapa menu_Pizzeria_B.json för egen meny.
   python3 test_order_with_rest_id.py https://web-production-xxxx.up.railway.app
 """
 import sys
-import requests
+import httpx
 
 BASE = "http://localhost:8000"
 if len(sys.argv) > 1:
@@ -34,14 +34,14 @@ payload = {
 def main():
     print("📤 Webhook med ?rest_id=Gislegrillen_01 →", URL)
     try:
-        r = requests.post(URL, json=payload, timeout=10)
+        r = httpx.post(URL, json=payload, timeout=10)
         print("Status:", r.status_code)
         print("Svar:", r.text[:400])
         if r.status_code == 200 and "success" in r.text.lower():
             print("\n✅ OK – rest_id används för meny/cache/Supabase.")
         else:
             print("\n⚠️  Kontrollera svar eller starta servern.")
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print("❌ Servern svarar inte. Starta med: python3 main.py")
     except Exception as e:
         print("❌", e)

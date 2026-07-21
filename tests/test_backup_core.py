@@ -99,7 +99,7 @@ def test_restore_uses_real_primary_keys(monkeypatch):
     calls = []
 
     class Response:
-        ok = True
+        is_success = True
         status_code = 201
         text = ""
 
@@ -113,7 +113,7 @@ def test_restore_uses_real_primary_keys(monkeypatch):
 
     monkeypatch.setattr(restore_backup, "SUPABASE_URL", "https://example.invalid")
     monkeypatch.setattr(restore_backup, "SUPABASE_KEY", "service-key")
-    monkeypatch.setattr(restore_backup.requests, "post", fake_post)
+    monkeypatch.setattr(restore_backup.httpx, "post", fake_post)
 
     restore_backup.restore_table(
         {
