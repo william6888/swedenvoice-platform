@@ -74,6 +74,13 @@ class _Query:
         self._filters.append(lambda r, c=col, v=val: r.get(c) == v)
         return self
 
+    def is_(self, col: str, val: Any):
+        if str(val).lower() == "null":
+            self._filters.append(lambda r, c=col: r.get(c) is None)
+        else:
+            self._filters.append(lambda r, c=col, v=val: r.get(c) == v)
+        return self
+
     def in_(self, col: str, values: List[Any]):
         vs = list(values)
         self._filters.append(lambda r, c=col, v=vs: r.get(c) in v)

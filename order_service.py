@@ -338,7 +338,7 @@ def update_order_status(
             q = q.eq("restaurant_id", restaurant_id)
         resp = q.execute()
         data = getattr(resp, "data", None)
-        if isinstance(data, list) and len(data) == 0:
+        if not isinstance(data, list) or len(data) == 0:
             return (False, "not_found_or_rls")
         return (True, None)
     except Exception as e:
