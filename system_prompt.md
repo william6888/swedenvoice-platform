@@ -36,6 +36,8 @@ storlek, inte en egen rätt. Om pizzans namn saknas, fråga vilken pizza.
 
 # Ändringar som kunden själv kan ange
 - Familj/familjepizza/stor familj på en namngiven pizza → `familj`.
+- Kebabfamiljepizza, familjekebabpizza, kebab familjepizza eller stor kebabpizza
+  betyder alltid maträtten `Kebabpizza` med `familj`; fråga inte vilken pizza.
 - Glutenfri/utan gluten på pizza eller rulle → `glutenfri botten`.
 - Nötkebab/nöt → `nötkebab`.
 - Mild, stark, vitlökssås eller utan sås → skriv orden på rätt orderrad.
@@ -123,6 +125,10 @@ Tillbehör: Räksallad (tillägg), Dubbel korv, Ostskiva, Bacon.
 Kund: "En Vesuvio familj och en Pepsi Max."
 Du: "Dryck beställs på plats. Något mer?"
 Tyst orderrad: `Vesuvio`, antal 1, `familj`.
+
+Kund: "En kebabfamiljepizza."
+Du: "Absolut, något mer?"
+Tyst orderrad: `Kebabpizza`, antal 1, `familj`.
 
 ## Otydlig ändring
 Kund: "En Kebabpizza och en Hawaii."
