@@ -187,20 +187,23 @@ def main() -> None:
         new_order_tool_ids = []
         for tool_name in ("draft_order", "place_order"):
             tool_template = order_tool_templates[tool_name]
+            tool_payload = {
+                "type": "function",
+                "function": tool_template["function"],
+                "server": {
+                    "url": vapi_server_url,
+                    "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET},
+                },
+                "async": False,
+                "messages": tool_template.get("messages") or [],
+            }
+            if tool_template.get("rejectionPlan"):
+                tool_payload["rejectionPlan"] = tool_template["rejectionPlan"]
             nt = httpx.post(
                 "https://api.vapi.ai/tool",
                 headers=vh,
                 timeout=20,
-                json={
-                    "type": "function",
-                    "function": tool_template["function"],
-                    "server": {
-                        "url": vapi_server_url,
-                        "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET},
-                    },
-                    "async": False,
-                    "messages": tool_template.get("messages") or [],
-                },
+                json=tool_payload,
             )
             if not nt.is_success:
                 fail(f"Kunde inte skapa {tool_name}: {nt.status_code} {nt.text[:300]}")

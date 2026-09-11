@@ -89,8 +89,7 @@ def test_five_retries_create_one_order(_reset_main):
 
 
 def test_two_place_orders_same_call_create_one_order(_reset_main):
-    """Skydd: AI ringer place_order två gånger i samma samtal med olika
-    tool_call_id (eller t.o.m. olika items) → bara en order, ett SMS."""
+    """En ändrad andra payload får inte återrapporteras som lyckad."""
     db = _reset_main
     first = _commit(db, vapi_tool_call_id="tool-A")
     assert first["success"] and not first.get("idempotent_replay")
@@ -106,14 +105,53 @@ def test_two_place_orders_same_call_create_one_order(_reset_main):
         vapi_tool_call_id="tool-B",
         special_requests="",
     )
-    assert second["success"]
+    assert not second["success"]
     assert second["order_id"] == first["order_id"]
-    assert second["idempotent_replay"] is True
+    assert second["idempotent_replay"] is False
+    assert second["error_code"] == "ORDER_ALREADY_COMMITTED_DIFFERENT_PAYLOAD"
     assert len(db.get_orders()) == 1
 
     events = [e for e in db.get_events() if e.get("event_type") == "duplicate_place_order_in_call"]
     assert len(events) == 1
     assert events[0].get("payload", {}).get("vapi_call_id") == "call-1"
+
+
+def test_same_payload_new_tool_call_in_same_call_is_replayed(_reset_main):
+    first = _commit(_reset_main, vapi_tool_call_id="tool-A")
+    second = _commit(_reset_main, vapi_tool_call_id="tool-B")
+
+    assert first["success"]
+    assert second["success"]
+    assert second["order_id"] == first["order_id"]
+    assert second["idempotent_replay"] is True
+    assert len(_reset_main.get_orders()) == 1
+
+
+def test_exact_retry_replays_after_draft_was_cleared(_reset_main):
+    token = M._auto_issue_draft_token(
+        items=_items(),
+        raw_items=_resolved_raw(),
+        restaurant_uuid="u-rest-1",
+        special_requests="extra ost",
+        vapi_call_id="call-1",
+    )
+    first = _commit(
+        _reset_main,
+        draft_token=token,
+        require_draft_token=True,
+    )
+    assert first["success"]
+    M._clear_draft_cache_for_call("call-1")
+
+    retry = _commit(
+        _reset_main,
+        draft_token=None,
+        require_draft_token=True,
+    )
+    assert retry["success"]
+    assert retry["idempotent_replay"] is True
+    assert retry["order_id"] == first["order_id"]
+    assert len(_reset_main.get_orders()) == 1
 
 
 def test_two_place_orders_different_calls_create_two_orders(_reset_main):

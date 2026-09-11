@@ -15,6 +15,7 @@ contains older setup examples and must not be used for production values.
 - Maximum call duration: `300` seconds.
 - Railway: `REQUIRE_DRAFT_TOKEN=true`.
 - `place_order` and `draft_order` must have `async=false`.
+- `place_order` must use the confirmation `rejectionPlan` below.
 
 The English Deepgram fallback must not be used for Swedish calls. A fallback
 must also be explicitly configured for Swedish.
@@ -61,6 +62,19 @@ Use the same parameter schema for `draft_order` and `place_order`:
 The LLM must never send menu IDs. The backend resolves names to canonical menu
 items and rejects ambiguity.
 
+### `place_order` confirmation guard
+
+Attach a `rejectionPlan` to `place_order` that rejects the tool call when any
+of these are true:
+
+- the latest customer message lacks an explicit affirmative;
+- the latest customer message contains a rejection or correction;
+- the latest assistant message does not contain `Stämmer allt`.
+
+This is enforced in the live Vapi tool and copied by
+`scripts/onboard_pizzeria.py`. The backend separately requires the latest
+draft payload hash. Neither layer replaces the other.
+
 ## Transaction contract
 
 1. Collect the complete order and service mode.
@@ -72,6 +86,9 @@ items and rejects ambiguity.
 6. End the call only when `place_order` returns `success: true`.
 
 In strict mode, a payload that differs from the latest draft is rejected. The
+successful tool response deliberately omits price, so the model cannot read
+an internal menu price aloud. A second, different payload in the same call is
+rejected rather than incorrectly replaying the first order as a success. The
 customer-facing end-call message may therefore safely say:
 
 `Beställningen är mottagen. Välkommen.`

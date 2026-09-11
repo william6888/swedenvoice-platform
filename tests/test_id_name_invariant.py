@@ -56,7 +56,7 @@ def test_id_name_match_passes():
     assert resolved[0]["matchType"] == "exact"
 
 
-def test_id_name_substring_passes():
+def test_id_name_registered_alias_passes():
     idx = _build_index()
     ok, resolved, _ = menu_match.resolve_order_items(
         [{"id": 35, "name": "kebab pizza", "quantity": 2}],
@@ -65,3 +65,19 @@ def test_id_name_substring_passes():
     )
     assert ok
     assert resolved[0]["id"] == 35
+
+
+def test_id_name_substring_conflicts_are_blocked():
+    idx = _build_index()
+    for item_id, misleading_name in (
+        (1, "Capri"),
+        (10, "Hawaiisallad"),
+    ):
+        ok, resolved, unmatched = menu_match.resolve_order_items(
+            [{"id": item_id, "name": misleading_name, "quantity": 1}],
+            idx,
+            "test_rest",
+        )
+        assert not ok
+        assert not resolved
+        assert unmatched[0]["match"]["type"] == "id_name_mismatch"

@@ -71,60 +71,13 @@ The server will start on `http://localhost:8000`
 
 ## 📱 Vapi.ai Setup
 
-### Create Assistant
+Use `VAPI_PRODUCTION_CONFIG.md` as the only production setup reference. It
+defines the tested model, Swedish transcriber, voice, strict synchronous
+`draft_order` → readback → explicit confirmation → `place_order` flow, schemas
+without menu IDs, and the Vapi confirmation rejection guard.
 
-1. Go to Vapi.ai dashboard
-2. Create a new assistant with these settings:
-
-**Model Configuration:**
-- Choose an LLM provider and model in Vapi that supports Swedish well (e.g. a fast hosted model in Vapi’s dashboard).
-- Temperature: ~0.7 (tune as needed)
-- Max Tokens: ~500
-
-**System Prompt:**
-Copy the contents from `system_prompt.md`
-
-**Voice Settings:**
-- Provider: ElevenLabs or similar
-- Language: Swedish (sv-SE)
-- Voice: Choose a professional, friendly voice
-
-### Configure Tool (Function Calling)
-
-Add a server tool:
-
-**Tool Name:** `place_order`
-
-**Server URL:** `https://DIN-RAILWAY-URL.up.railway.app/vapi/webhook` (deploy via Railway, se RAILWAY_GUIDE.md)
-
-**Description:** "Place a customer order with items, quantities, and special requests"
-
-**Parameters Schema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "items": {
-      "type": "array",
-      "description": "List of ordered items",
-      "items": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "integer", "description": "Menu item ID"},
-          "name": {"type": "string", "description": "Menu item name"},
-          "quantity": {"type": "integer", "description": "Quantity ordered"}
-        },
-        "required": ["id", "name", "quantity"]
-      }
-    },
-    "special_requests": {
-      "type": "string",
-      "description": "Special requests like 'ingen lök', 'extra ost'"
-    }
-  },
-  "required": ["items"]
-}
-```
+Use `scripts/onboard_pizzeria.py` to clone this configuration safely for a new
+tenant. Do not recreate tools from older examples in `VAPI_SETUP_GUIDE.md`.
 
 ## 🎨 Kitchen Dashboard
 
@@ -170,21 +123,25 @@ publika API:er.
 
 **Varför en worker?** Procfile använder `--workers 1` så att meny-cache och tenant-invalidate gäller direkt i hela appen. Flera workers skulle ge var sin cache; då gäller invalidate bara för den process som fick anropet.
 
-**Flera pizzerior:** Varje pizzeria har egen meny (och cache) via `rest_id`. Ny pizzeria = egen fil `menu_<rest_id>.json` (valfritt; annars används `menu.json`). Inget blandas. Se **MULTI_PIZZERIA.md**.
+**Flera pizzerior:** Varje pizzeria har egen databasmeny och cache via
+`rest_id`. En okänd tenant får aldrig Gislegrillens standardmeny. Se
+**MULTI_PIZZERIA.md**.
 
 ## 🔔 Order Flow
 
 1. **Customer calls** → Vapi answers with Swedish AI personality
 2. **AI takes order** → Validates items from menu.json
-3. **AI confirms** → Customer approves order
-4. **AI calls tool** → `place_order` endpoint triggered
-5. **Backend processes:**
+3. **AI drafts** → Calls `draft_order` and reads the canonical result
+4. **Customer confirms** → Explicitly approves the complete readback
+5. **AI commits** → Calls synchronous `place_order` with the unchanged payload
+6. **Backend processes:**
    - Validates items against the tenant's menu
    - Saves to Supabase (system of record)
    - Prints kitchen ticket to console / logs
    - Sends SMS (Vonage) when configured
-6. **AI confirms** → "Tack för din beställning! Den är klar om 15 minuter."
-7. **Kitchen staff** → Views order on dashboard, marks as ready
+7. **AI confirms** → Only after the tool returns `success: true`; never promises
+   a preparation time
+8. **Kitchen staff** → Views order on dashboard, marks as ready
 
 Systemet hanterar medvetet **inga priser**. Betalning sker på plats.
 
