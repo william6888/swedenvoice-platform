@@ -128,10 +128,10 @@ ORDER_REQUIRE_DB_COMMIT = (os.getenv("ORDER_REQUIRE_DB_COMMIT", "true") or "true
 DASHBOARD_FROM_DB = (os.getenv("DASHBOARD_FROM_DB", "true") or "true").strip().lower() == "true"
 # DEFAULT_DASHBOARD_REST_ID styr vilken tenant lokala /dashboard visar i utveckling.
 DEFAULT_DASHBOARD_REST_ID = _clean_env_value("DEFAULT_DASHBOARD_REST_ID", "Gislegrillen_01")
-# REQUIRE_DRAFT_TOKEN=true kräver signerad payload vid commit. Saknas token
-# auto-utfärdas den server-side (AI behöver inte alltid anropa draft_order).
-# Default false = bakåtkompatibelt; true = extra hash-skydd utan hårda Vapi-fel.
-REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "false") or "false").strip().lower() == "true"
+# REQUIRE_DRAFT_TOKEN=true kräver att exakt samma payload först har validerats
+# av draft_order under samtalet. Token hålls server-side per call_id.
+# Default true är säkert för produktion; äldre assistenter kan uttryckligen sätta false.
+REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "true") or "true").strip().lower() == "true"
 # OPS_AGENT_ENABLED=true startar ops-worker som in-process bakgrundstask.
 # Detta ger autonom drift utan extern cron (Railway/GitHub Actions). Default ON.
 OPS_AGENT_ENABLED = (os.getenv("OPS_AGENT_ENABLED", "true") or "true").strip().lower() == "true"
@@ -142,7 +142,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-07-21-api-security-2"
+BUILD_TAG = "2026-09-11-vapi-reliability-1"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -455,6 +455,48 @@ def _parse_items_from_params(params: dict, rest_id: Optional[str] = None) -> lis
             d["name"] = mi["name"] if mi else (d.get("name") or f"Artikel {d.get('id', '?')}")
         out.append(d)
     return out
+
+
+def _order_special_requests_from_params(params: dict) -> str:
+    """
+    Normalisera server-trustad serveringsform från nya Vapi-schemat.
+
+    `special_requests` behålls för äldre assistenter, men nya assistenter skickar
+    varje ändring på rätt orderrad och bara `service_mode` på ordernivå.
+    """
+    legacy = str(
+        params.get("special_requests")
+        or params.get("specialRequests")
+        or ""
+    ).strip()
+    raw_mode = str(
+        params.get("service_mode")
+        or params.get("serviceMode")
+        or ""
+    ).strip()
+    mode_key = (
+        raw_mode.casefold()
+        .replace("_", " ")
+        .replace("-", " ")
+    )
+    mode_key = re.sub(r"\s+", " ", mode_key).strip()
+    if mode_key in {"ta med", "takeaway", "take away"}:
+        mode = "Ta med"
+    elif mode_key in {"äta här", "ata har", "äta har", "ata här"}:
+        mode = "Äta här"
+    else:
+        mode = ""
+
+    if not mode:
+        return legacy
+    if not legacy:
+        return mode
+
+    legacy_key = legacy.casefold().replace("_", " ")
+    if legacy_key.startswith(mode.casefold()):
+        return legacy
+    return f"{mode}. {legacy}"
+
 
 def load_menu(rest_id: Optional[str] = None) -> dict:
     """Load menu: default-tenant → menu.json, annan tenant → endast egen fil."""
@@ -986,8 +1028,34 @@ def _commit_order_supabase_first(
             effective_draft_token = cached_draft.get("draft_token")
             print(f"draft: återanvänder cached draft_token för call_id={vapi_call_id}")
 
-    # Saknas token: utfärda automatiskt (ingen DRAFT_REQUIRED som stoppar order/SMS).
-    if not effective_draft_token and (require_draft_token or vapi_call_id):
+    # I strikt läge måste exakt samma payload först ha validerats av draft_order.
+    # Server-cachen gör att LLM:en aldrig behöver hantera själva tokensträngen.
+    if not effective_draft_token and require_draft_token:
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="draft_required",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=None,
+            correlation_id=correlation_id,
+            payload={"payload_hash": payload_hash, "vapi_call_id": vapi_call_id},
+        )
+        return {
+            "success": False,
+            "order_id": None,
+            "db_order_id": None,
+            "total_price": None,
+            "needs_human_review": False,
+            "idempotent_replay": False,
+            "error_code": "DRAFT_REQUIRED",
+            "error_message": (
+                "Beställningen måste valideras och läsas upp igen före bekräftelse."
+            ),
+            "idempotency_key": idempotency_key,
+        }
+
+    # Bakåtkompatibelt, icke-strikt läge för äldre assistenter.
+    if not effective_draft_token and vapi_call_id:
         effective_draft_token = _auto_issue_draft_token(
             items=items,
             raw_items=raw_items,
@@ -1013,8 +1081,12 @@ def _commit_order_supabase_first(
             expected_restaurant_uuid=restaurant_uuid,
             expected_payload_hash=payload_hash,
         )
-        if not ok and err_code in ("HASH_MISMATCH", "EXPIRED", "INVALID_SIGNATURE"):
-            # Kunden/AI ändrade lista eller token gick ut – förnya en gång, fortsätt.
+        if (
+            not ok
+            and not require_draft_token
+            and err_code in ("HASH_MISMATCH", "EXPIRED", "INVALID_SIGNATURE")
+        ):
+            # I kompatibilitetsläge kan en gammal assistent få en förnyad token.
             effective_draft_token = _auto_issue_draft_token(
                 items=items,
                 raw_items=raw_items,
@@ -2973,7 +3045,7 @@ def _handle_draft_order_params(
             price=it.get("price"),
             special_requests=it.get("special_requests"),
         ))
-    special_requests = params.get("special_requests") or params.get("specialRequests") or ""
+    special_requests = _order_special_requests_from_params(params)
     draft = _build_draft_for_items(
         items=items,
         raw_items=resolved_items,
@@ -3100,6 +3172,7 @@ def _handle_place_order_params(
         raw_transcript = _get_raw_transcript_from_webhook(body)
         vapi_call_id = _get_call_id_from_webhook(body)
         draft_token = params.get("draft_token") or params.get("draftToken")
+        special_requests = _order_special_requests_from_params(params)
         commit = _commit_order_supabase_first(
             items=items,
             raw_items=resolved_items,
@@ -3109,7 +3182,7 @@ def _handle_place_order_params(
             customer_name=customer_name,
             customer_phone=customer_phone,
             raw_transcript=raw_transcript,
-            special_requests=params.get("special_requests"),
+            special_requests=special_requests,
             vapi_call_id=vapi_call_id,
             vapi_tool_call_id=tool_call_id if tool_call_id != "direct-place-order" else None,
             correlation_id=vapi_call_id,
@@ -3141,7 +3214,7 @@ def _handle_place_order_params(
         sms_payload_order = Order(
             order_id=order_id,
             items=items,
-            special_requests=params.get("special_requests"),
+            special_requests=special_requests,
             total_price=total_price or 0.0,
             status="needs_review" if needs_review else "pending",
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

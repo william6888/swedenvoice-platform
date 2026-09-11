@@ -116,8 +116,8 @@ def verify_draft_token(
 def format_verbal_readback(items: list, special_requests: str = "") -> str:
     """
     Text AI ska läsa upp för kunden – inga priser, inga id-nummer (matchar original-prompt).
-  """
-    parts: list = []
+    """
+    parts: list[str] = []
     for it in items:
         try:
             qty = int(it.get("quantity") or 1)
@@ -126,15 +126,39 @@ def format_verbal_readback(items: list, special_requests: str = "") -> str:
         name = str(it.get("name") or "okänd").strip()
         sr = (it.get("special_requests") or it.get("notes") or "").strip()
         if qty == 1:
-            line = f"En {name}"
+            line = f"en {name}"
+        elif qty == 2:
+            line = f"två {name}"
+        elif qty == 3:
+            line = f"tre {name}"
         else:
             line = f"{qty} {name}"
         if sr:
-            line += f" med {sr}"
+            line += f", {sr}"
         parts.append(line)
-    if special_requests and special_requests.strip():
-        parts.append(f"Speciellt: {special_requests.strip()}")
-    return ", ".join(parts) + "." if parts else "Ingen beställning."
+
+    if not parts:
+        return "Ingen beställning."
+
+    if len(parts) == 1:
+        text = parts[0]
+    else:
+        text = ", ".join(parts[:-1]) + " och " + parts[-1]
+    text = text[:1].upper() + text[1:]
+
+    order_notes = (special_requests or "").strip()
+    normalized = order_notes.casefold().replace("_", " ")
+    if normalized.startswith("ta med"):
+        text += ", för att ta med"
+        order_notes = order_notes[len("ta med"):].lstrip(" .;,:")
+    elif normalized.startswith("äta här") or normalized.startswith("ata har"):
+        prefix_len = len("äta här") if normalized.startswith("äta här") else len("ata har")
+        text += ", för att äta här"
+        order_notes = order_notes[prefix_len:].lstrip(" .;,:")
+
+    if order_notes:
+        text += f". Övrigt: {order_notes}"
+    return text + "."
 
 
 def format_canonical_readback(items: list, total_price: float, special_requests: str = "") -> str:

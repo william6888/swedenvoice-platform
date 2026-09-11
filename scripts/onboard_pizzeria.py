@@ -5,8 +5,8 @@ Onboarda en ny pizzeria – hela kedjan i ett kommando.
 Gör i ordning:
   1. POST /admin/tenants/onboard  → restaurants-rad (egen UUID), meny i menus, tenant_health
   2. (--create-vapi-assistant)    → klonar Gislegrillen-assistenten i Vapi:
-        - genererar system-prompt från menyfilen (namn + ID-karta per kategori)
-        - skapar place_order-tool med tenantens serverUrl + X-Webhook-Secret
+        - genererar system-prompt från menyfilen (namn per kategori)
+        - skapar draft_order + place_order med tenantens URL och webhook-secret
         - skapar assistent med samma modell/röst men tenantens namn och prompt
   3. GET /admin/tenants/{rest_id}/preflight → verifierar att allt är grönt
 
@@ -60,29 +60,43 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
-def build_id_map(menu: dict) -> str:
-    """Generera ID-kartan för system-prompten från meny-JSON."""
+def build_menu_names(menu: dict) -> str:
+    """Generera kompakt lista med kanoniska menynamn utan LLM-styrda id:n."""
     lines = []
     for cat, items in menu.items():
         if not isinstance(items, list) or not items:
             continue
         label = CATEGORY_LABELS.get(cat, cat.capitalize())
-        pairs = ", ".join(f"{it['name']}={it['id']}" for it in items if isinstance(it, dict) and it.get("id") is not None)
-        if pairs:
-            lines.append(f"{label}: {pairs}.")
+        names = ", ".join(
+            str(it["name"]).strip()
+            for it in items
+            if isinstance(it, dict) and str(it.get("name") or "").strip()
+        )
+        if names:
+            lines.append(f"{label}: {names}.")
     return "\n".join(lines)
 
 
 def build_system_prompt(name: str, menu: dict) -> str:
-    """Bygg tenantens system-prompt från Gislegrillen-mallen: byt namn + ID-karta."""
+    """Bygg tenantens system-prompt från Gislegrillen-mallen: byt namn + meny."""
     template = (ROOT / "system_prompt.md").read_text(encoding="utf-8")
     # Byt varumärke i personlighetsraden.
     prompt = template.replace("Gislegrillen", name)
-    # Ersätt ID-kartan (allt efter "Använd rätt id från menyn:") med tenantens egna.
-    marker = "Använd rätt id från menyn:"
-    if marker in prompt:
-        head = prompt.split(marker)[0]
-        prompt = head + marker + "\n" + build_id_map(menu) + "\n"
+    # Ersätt bara menysektionen och behåll exemplen efter den.
+    marker = "# Menynamn"
+    next_marker = "# Exempel"
+    if marker in prompt and next_marker in prompt:
+        head, remainder = prompt.split(marker, 1)
+        _, tail = remainder.split(next_marker, 1)
+        prompt = (
+            head
+            + marker
+            + "\n"
+            + build_menu_names(menu)
+            + "\n\n"
+            + next_marker
+            + tail
+        )
     return prompt
 
 
@@ -151,39 +165,66 @@ def main() -> None:
             fail(f"Kunde inte läsa mall-assistenten: {tpl.status_code} {tpl.text[:200]}")
         template = tpl.json()
 
-        # place_order-tool för tenanten (egen URL + secret-header).
+        # Orderverktyg för tenanten (egen URL + secret-header).
         tpl_model = template.get("model") or {}
         tool_ids = tpl_model.get("toolIds") or []
-        place_order_schema = None
+        order_tool_templates = {}
         keep_tool_ids = []
         for tid in tool_ids:
             tr = httpx.get(f"https://api.vapi.ai/tool/{tid}", headers=vh, timeout=20)
             if not tr.is_success:
                 continue
             t = tr.json()
-            if (t.get("function") or {}).get("name") == "place_order":
-                place_order_schema = t.get("function")
+            tool_name = (t.get("function") or {}).get("name")
+            if tool_name in {"draft_order", "place_order"}:
+                order_tool_templates[tool_name] = t
             else:
                 keep_tool_ids.append(tid)  # transferCall/endCall är tenant-neutrala
-        if not place_order_schema:
-            fail("Hittade ingen place_order-tool på mall-assistenten")
+        missing_tools = {"draft_order", "place_order"} - set(order_tool_templates)
+        if missing_tools:
+            fail(f"Saknar orderverktyg på mall-assistenten: {', '.join(sorted(missing_tools))}")
 
-        nt = httpx.post(
-            "https://api.vapi.ai/tool", headers=vh, timeout=20,
-            json={
-                "type": "function",
-                "function": place_order_schema,
-                "server": {"url": vapi_server_url, "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET}},
-            },
-        )
-        if not nt.is_success:
-            fail(f"Kunde inte skapa place_order-tool: {nt.status_code} {nt.text[:300]}")
-        new_tool_id = nt.json()["id"]
-        print(f"   ✅ place_order-tool skapad: {new_tool_id}")
+        new_order_tool_ids = []
+        for tool_name in ("draft_order", "place_order"):
+            tool_template = order_tool_templates[tool_name]
+            nt = httpx.post(
+                "https://api.vapi.ai/tool",
+                headers=vh,
+                timeout=20,
+                json={
+                    "type": "function",
+                    "function": tool_template["function"],
+                    "server": {
+                        "url": vapi_server_url,
+                        "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET},
+                    },
+                    "async": False,
+                    "messages": tool_template.get("messages") or [],
+                },
+            )
+            if not nt.is_success:
+                fail(f"Kunde inte skapa {tool_name}: {nt.status_code} {nt.text[:300]}")
+            new_tool_id = nt.json()["id"]
+            new_order_tool_ids.append(new_tool_id)
+            print(f"   ✅ {tool_name} skapad: {new_tool_id}")
 
         system_prompt = build_system_prompt(args.name, menu)
-        new_model = {k: v for k, v in tpl_model.items() if k in ("provider", "model", "temperature", "maxTokens")}
-        new_model["toolIds"] = [new_tool_id] + keep_tool_ids
+        new_model = {
+            k: v
+            for k, v in tpl_model.items()
+            if k
+            in (
+                "provider",
+                "model",
+                "temperature",
+                "maxTokens",
+                "reasoningEffort",
+                "promptCacheRetention",
+            )
+        }
+        if new_model.get("promptCacheRetention"):
+            new_model["promptCacheKey"] = f"restaurant-order-{args.external_id}"
+        new_model["toolIds"] = new_order_tool_ids + keep_tool_ids
         new_model["messages"] = [{"role": "system", "content": system_prompt}]
 
         payload = {

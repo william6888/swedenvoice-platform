@@ -1,5 +1,10 @@
 # Vapi.ai Setup Guide for Gislegrillen
 
+> **Legacy guide:** Model-, tool- och samtalsexemplen längre ned är äldre och
+> ska inte användas i produktion. Använd
+> [`VAPI_PRODUCTION_CONFIG.md`](VAPI_PRODUCTION_CONFIG.md) som aktuell
+> konfiguration.
+
 This guide will help you configure Vapi.ai to work with your Gislegrillen Voice AI Order System.
 
 ## Step 1: Expose Your Server
