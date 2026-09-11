@@ -69,7 +69,8 @@ of these are true:
 
 - the latest customer message lacks an explicit affirmative;
 - the latest customer message contains a rejection or correction;
-- the latest assistant message does not contain `Stämmer allt`.
+- the latest assistant message does not contain `Stämmer det` (or the
+  equivalent `Stämmer allt`).
 
 This is enforced in the live Vapi tool and copied by
 `scripts/onboard_pizzeria.py`. The backend separately requires the latest
