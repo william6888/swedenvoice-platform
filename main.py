@@ -130,8 +130,8 @@ DASHBOARD_FROM_DB = (os.getenv("DASHBOARD_FROM_DB", "true") or "true").strip().l
 DEFAULT_DASHBOARD_REST_ID = _clean_env_value("DEFAULT_DASHBOARD_REST_ID", "Gislegrillen_01")
 # REQUIRE_DRAFT_TOKEN=true kräver att exakt samma payload först har validerats
 # av draft_order under samtalet. Token hålls server-side per call_id.
-# Default false finns bara för bakåtkompatibilitet med äldre assistenter.
-REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "false") or "false").strip().lower() == "true"
+# Default true är säkert för produktion; äldre assistenter kan uttryckligen sätta false.
+REQUIRE_DRAFT_TOKEN = (os.getenv("REQUIRE_DRAFT_TOKEN", "true") or "true").strip().lower() == "true"
 # OPS_AGENT_ENABLED=true startar ops-worker som in-process bakgrundstask.
 # Detta ger autonom drift utan extern cron (Railway/GitHub Actions). Default ON.
 OPS_AGENT_ENABLED = (os.getenv("OPS_AGENT_ENABLED", "true") or "true").strip().lower() == "true"
