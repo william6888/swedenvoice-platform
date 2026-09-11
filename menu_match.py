@@ -383,12 +383,12 @@ def resolve_order_items(
             if sent_name:
                 sent_norm = normalize(sent_name)
                 canonical_norm = normalize(name)
-                # Försök även mot aliaslookup för att tillåta legitima alias.
+                # Acceptera bara exakt kanoniskt namn eller ett alias som pekar
+                # på samma id. Substring-matchning är osäker för t.ex.
+                # Capri/Capricciosa och Hawaii/Hawaiisallad.
                 alias_match_id = index.lookup.get(sent_norm) or index.lookup.get(sent_norm.replace(" ", ""))
                 names_match = (
                     sent_norm == canonical_norm
-                    or sent_norm in canonical_norm
-                    or canonical_norm in sent_norm
                     or alias_match_id == by_id
                 )
                 if not names_match:

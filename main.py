@@ -142,7 +142,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-11-vapi-reliability-1"
+BUILD_TAG = "2026-09-11-vapi-reliability-2"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -1021,6 +1021,36 @@ def _commit_order_supabase_first(
         payload_hash=payload_hash,
     )
 
+    # Exakt retry måste fungera även efter att en lyckad commit har förbrukat
+    # och rensat draft-token. Detta är säkert eftersom samma idempotency key
+    # även binder call, tool call och payload-hash.
+    existing, lookup_err = order_service.lookup_existing_idempotency(_supabase_client, idempotency_key)
+    if existing and (existing.get("status") == "completed"):
+        cached_response = existing.get("response") or {}
+        print(
+            f"order_integrity: replay för key={idempotency_key} → returnerar cached order {cached_response.get('order_id')}"
+        )
+        order_service.write_order_event(
+            _supabase_client,
+            event_type="idempotent_replay",
+            restaurant_uuid=restaurant_uuid,
+            restaurant_id=restaurant_id,
+            order_id=cached_response.get("order_id"),
+            correlation_id=correlation_id,
+            payload={"idempotency_key": idempotency_key},
+        )
+        return {
+            "success": True,
+            "order_id": cached_response.get("order_id"),
+            "db_order_id": existing.get("db_order_id"),
+            "total_price": cached_response.get("total_price"),
+            "needs_human_review": bool(cached_response.get("needs_human_review")),
+            "idempotent_replay": True,
+            "error_code": None,
+            "error_message": None,
+            "idempotency_key": idempotency_key,
+        }
+
     effective_draft_token = (draft_token or "").strip() or None
     if not effective_draft_token and vapi_call_id:
         cached_draft = _get_cached_draft_for_call(vapi_call_id)
@@ -1131,45 +1161,19 @@ def _commit_order_supabase_first(
                 "draft_error_code": err_code,
             }
 
-    # 2. Idempotency lookup (samma payload + samma tool_call_id).
-    existing, lookup_err = order_service.lookup_existing_idempotency(_supabase_client, idempotency_key)
-    if existing and (existing.get("status") == "completed"):
-        cached_response = existing.get("response") or {}
-        print(
-            f"order_integrity: replay för key={idempotency_key} → returnerar cached order {cached_response.get('order_id')}"
-        )
-        order_service.write_order_event(
-            _supabase_client,
-            event_type="idempotent_replay",
-            restaurant_uuid=restaurant_uuid,
-            restaurant_id=restaurant_id,
-            order_id=cached_response.get("order_id"),
-            correlation_id=correlation_id,
-            payload={"idempotency_key": idempotency_key},
-        )
-        return {
-            "success": True,
-            "order_id": cached_response.get("order_id"),
-            "db_order_id": existing.get("db_order_id"),
-            "total_price": cached_response.get("total_price"),
-            "needs_human_review": bool(cached_response.get("needs_human_review")),
-            "idempotent_replay": True,
-            "error_code": None,
-            "error_message": None,
-            "idempotency_key": idempotency_key,
-        }
-
     # 2b. Per-call dedup: om AI ringer place_order två gånger i samma samtal
-    #     (olika tool_call_id, eller olika items pga LLM-hallucination) vill vi
-    #     INTE skapa en andra order eller skicka ett andra SMS. Replay:a den
-    #     första ordern i det samtalet.
+    #     ska samma payload replayas. En ändrad payload får däremot aldrig
+    #     rapporteras som lyckad, eftersom den redan sparade ordern då inte
+    #     motsvarar vad kunden/modellen försökte skicka.
     if vapi_call_id:
         existing_call, _ = order_service.lookup_completed_for_call(_supabase_client, vapi_call_id)
         if existing_call:
             cached_response = existing_call.get("response") or {}
+            same_payload = existing_call.get("payload_hash") == payload_hash
             print(
                 f"order_integrity: per-call dedup för call_id={vapi_call_id} → "
-                f"returnerar tidigare order {cached_response.get('order_id')}"
+                f"{'replay' if same_payload else 'blockerar ändrad payload'} för order "
+                f"{cached_response.get('order_id')}"
             )
             order_service.write_order_event(
                 _supabase_client,
@@ -1185,6 +1189,21 @@ def _commit_order_supabase_first(
                     "second_payload_hash": payload_hash,
                 },
             )
+            if not same_payload:
+                return {
+                    "success": False,
+                    "order_id": cached_response.get("order_id"),
+                    "db_order_id": existing_call.get("db_order_id"),
+                    "total_price": None,
+                    "needs_human_review": True,
+                    "idempotent_replay": False,
+                    "error_code": "ORDER_ALREADY_COMMITTED_DIFFERENT_PAYLOAD",
+                    "error_message": (
+                        "En annan beställning har redan sparats i detta samtal. "
+                        "Kontakta personalen för att ändra den."
+                    ),
+                    "idempotency_key": existing_call.get("key"),
+                }
             return {
                 "success": True,
                 "order_id": cached_response.get("order_id"),
@@ -2857,12 +2876,6 @@ def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
     seen_ids = set()
     out: List[Tuple[str, str, dict]] = []
 
-    def _items_in_args(args: dict) -> bool:
-        if not isinstance(args, dict):
-            return False
-        items = args.get("items") or args.get("order", {}).get("items") or args.get("full_order", {}).get("items")
-        return isinstance(items, list) and len(items) > 0
-
     def _add_from_tc(tc: dict) -> None:
         cid = tc.get("id", "unknown")
         if cid in seen_ids:
@@ -2876,8 +2889,6 @@ def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
             except json.JSONDecodeError:
                 args = {}
         tool_name = name
-        if tool_name not in ("place_order", "draft_order") and _items_in_args(args):
-            tool_name = "place_order"
         if tool_name not in ("place_order", "draft_order"):
             return
         seen_ids.add(cid)
@@ -3260,7 +3271,6 @@ def _handle_place_order_params(
         result_payload = {
             "success": True,
             "order_id": order_id,
-            "total_price": float(total_price or 0.0),
             "needs_human_review": needs_review,
         }
         if idempotent_replay:

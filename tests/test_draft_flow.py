@@ -58,6 +58,21 @@ def test_extract_vapi_tool_calls_draft_and_place():
     assert calls[1][1] == "place_order"
 
 
+def test_unknown_tool_with_items_is_not_coerced_to_place_order():
+    msg = {
+        "toolCallList": [
+            {
+                "id": "tc-unknown",
+                "function": {
+                    "name": "lookup_menu",
+                    "arguments": json.dumps(_items_payload()),
+                },
+            }
+        ]
+    }
+    assert M._extract_vapi_tool_calls(msg) == []
+
+
 def test_draft_order_params_returns_readback(monkeypatch):
     monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
     body = {"message": {"call": {"id": "call-draft-1"}}}
@@ -135,6 +150,7 @@ def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_m
     place_payload = json.loads(place_res["result"])
     assert place_payload.get("success") is True
     assert place_payload.get("order_id")
+    assert "total_price" not in place_payload
 
 
 def test_place_order_rejects_when_required_draft_is_missing(monkeypatch, _reset_main):
