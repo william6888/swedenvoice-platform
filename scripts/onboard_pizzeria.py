@@ -197,7 +197,10 @@ def main() -> None:
                 "async": False,
                 "messages": tool_template.get("messages") or [],
             }
-            if tool_template.get("rejectionPlan"):
+            # place_order must not copy a confirmation rejectionPlan. A rejected
+            # tool call previously made the assistant transfer instead of reading
+            # the order back.
+            if tool_name != "place_order" and tool_template.get("rejectionPlan"):
                 tool_payload["rejectionPlan"] = tool_template["rejectionPlan"]
             nt = httpx.post(
                 "https://api.vapi.ai/tool",

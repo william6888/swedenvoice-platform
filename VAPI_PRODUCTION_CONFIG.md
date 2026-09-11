@@ -1,13 +1,11 @@
 # Vapi production configuration
 
-This is the current source of truth for Gislegrillen. `VAPI_SETUP_GUIDE.md`
-contains older setup examples and must not be used for production values.
+This is the current source of truth for Gislegrillen.
 
 ## Recommended stack
 
 - Model: OpenAI `gpt-5.6-luna`, reasoning effort `none`, temperature `0`, max
-  tokens `250`. In the September 2026 eval set it passed all five critical
-  flows and had a median chat response time of `1.35 s`.
+  tokens `400`. Prompt cache key `gislegrillen-order-v2`.
 - Transcriber: Soniox `stt-rt-v5`, Swedish only, strict language hint, menu
   vocabulary, max endpoint delay `800 ms`.
 - Voice: ElevenLabs Jonas (`e6OiUVixGLmvtdn2GJYE`) with
@@ -15,10 +13,35 @@ contains older setup examples and must not be used for production values.
 - Maximum call duration: `300` seconds.
 - Railway: `REQUIRE_DRAFT_TOKEN=true`.
 - `place_order` and `draft_order` must have `async=false`.
-- `place_order` must use the confirmation `rejectionPlan` below.
+- Do not attach a confirmation `rejectionPlan` to `place_order`. A rejected
+  tool call returns the opaque string `Tool call rejected based on configured
+  rejection plan`, which previously made the assistant transfer to staff
+  instead of reading the order back.
+- Every tool must define `request-start` with empty `content` and no
+  conditions, plus `request-response-delayed` with empty `content`. An empty
+  `messages` array makes Vapi speak translated fillers such as
+  "Vänta en sekund." A start-message whose conditions never match also falls
+  back to those fillers.
+- `transfer_to_staff` may reject unless the latest customer utterance asks for
+  a human, staff, or allergy help.
 
 The English Deepgram fallback must not be used for Swedish calls. A fallback
 must also be explicitly configured for Swedish.
+
+## Conversation contract
+
+Take the order the way a cashier would:
+
+1. Repeat the food you heard and ask "Något mer?"
+2. Drinks are bought in store. Keep the food.
+3. Ask "Äta här eller ta med?" once.
+4. Call `draft_order`.
+5. Read `readback` exactly and ask "Stämmer det?" Never skip this, even if the
+   customer said okay or hello while the draft ran.
+6. After a clear yes/okay to that readback, call `place_order` with the same
+   payload.
+7. On success say "Tack, välkommen." and end the call.
+8. "Hallå", silence or "varför?" is not a reason to transfer.
 
 ## Required order tools
 
@@ -60,54 +83,17 @@ Use the same parameter schema for `draft_order` and `place_order`:
 ```
 
 The LLM must never send menu IDs. The backend resolves names to canonical menu
-items and rejects ambiguity.
-
-### `place_order` confirmation guard
-
-Attach a `rejectionPlan` to `place_order` that rejects the tool call when any
-of these are true:
-
-- the latest customer message lacks an explicit affirmative;
-- the latest customer message contains a rejection or correction;
-- the latest assistant message does not contain `Stämmer det` (or the
-  equivalent `Stämmer allt`).
-
-This is enforced in the live Vapi tool and copied by
-`scripts/onboard_pizzeria.py`. The backend separately requires the latest
-draft payload hash. Neither layer replaces the other.
-
-## Transaction contract
-
-1. Collect the complete order and service mode.
-2. Call `draft_order`.
-3. Read the returned `readback` and ask for explicit confirmation.
-4. Any correction returns to step 2.
-5. After explicit confirmation, call synchronous `place_order` with exactly the
-   same payload.
-6. End the call only when `place_order` returns `success: true`.
-
-In strict mode, a payload that differs from the latest draft is rejected. The
-successful tool response deliberately omits price, so the model cannot read
-an internal menu price aloud. A second, different payload in the same call is
-rejected rather than incorrectly replaying the first order as a success. The
-customer-facing end-call message may therefore safely say:
-
-`Beställningen är mottagen. Välkommen.`
-
-Never promise a pickup time.
+items and rejects ambiguity. Successful `place_order` tool results omit price.
 
 ## Required regression cases
 
-- Simple order.
-- Multiple items and quantities.
+- Kebabrulle + kebabtallrik + kebabpizza with mild sauce on the pizza: recap,
+  ask if anything else, takeaway, readback, confirm, thank, hang up. No wait
+  filler. No staff transfer.
 - Family size retained on the correct pizza.
 - Drink rejected without dropping food from the same utterance.
 - Ambiguous modifier asks which item.
-- Unnamed family pizza asks for the pizza name.
 - Correction causes a new draft and a new confirmation.
-- Menu no-match and ambiguous suggestions.
 - `place_order` failure never produces a success message or ends the call.
+- "Hallå" after a pause continues the order instead of transferring.
 - Human request and serious allergy transfer to staff.
-
-Run text evals first, then a small voice simulation set. Voice simulations must
-not point at a production order endpoint unless the tool result is mocked.
