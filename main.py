@@ -3658,6 +3658,7 @@ async def health_check():
             "vonage_request_encoding": "form_urlencoded",
             "backup_encryption_configured": bool(_clean_env_value("BACKUP_ENCRYPTION_KEY")),
             "ops_agent_enabled": bool(OPS_AGENT_ENABLED),
+            "draft_confirmation_required": bool(REQUIRE_DRAFT_TOKEN),
         }
     })
 
