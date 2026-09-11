@@ -81,6 +81,33 @@ def test_draft_order_params_returns_readback(monkeypatch):
     assert cached.get("draft_token")
 
 
+def test_draft_order_uses_service_mode_and_per_item_modifier(monkeypatch):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
+    body = {"message": {"call": {"id": "call-draft-service-mode"}}}
+    params = {
+        "items": [
+            {
+                "name": "Vesuvio",
+                "quantity": 1,
+                "special_requests": "familj",
+            }
+        ],
+        "service_mode": "ta_med",
+    }
+    result = M._handle_draft_order_params(
+        params,
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tc-service-mode",
+    )
+    payload = json.loads(result["result"])
+    assert payload["success"] is True
+    assert payload["readback"] == "En Vesuvio, familj, för att ta med."
+
+
 def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_main):
     monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", True)
     body = {"message": {"call": {"id": "call-cache-1"}}}
@@ -110,8 +137,8 @@ def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_m
     assert place_payload.get("order_id")
 
 
-def test_place_order_auto_drafts_when_no_prior_draft(monkeypatch, _reset_main):
-    """AI skippar draft_order – order ska ändå gå igenom (auto-draft)."""
+def test_place_order_rejects_when_required_draft_is_missing(monkeypatch, _reset_main):
+    """Strikt läge får aldrig committa en order som kunden inte fått uppläst."""
     monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", True)
     body = {"message": {"call": {"id": "call-nodraft"}}}
     place_res = M._handle_place_order_params(
@@ -124,8 +151,8 @@ def test_place_order_auto_drafts_when_no_prior_draft(monkeypatch, _reset_main):
         tool_call_id="tool-only",
     )
     place_payload = json.loads(place_res["result"])
-    assert place_payload.get("success") is True
-    assert place_payload.get("order_id")
+    assert place_payload.get("success") is False
+    assert "valideras och läsas upp igen" in place_payload.get("error", "")
 
 
 def test_draft_then_place_clears_cache(monkeypatch, _reset_main):
@@ -151,3 +178,32 @@ def test_draft_then_place_clears_cache(monkeypatch, _reset_main):
     )
     assert json.loads(place_res["result"])["success"] is True
     assert M._get_cached_draft_for_call("call-full") is None
+
+
+def test_strict_place_rejects_payload_changed_after_readback(monkeypatch, _reset_main):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", True)
+    body = {"message": {"call": {"id": "call-drift"}}}
+    M._handle_draft_order_params(
+        _items_payload(),
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+    )
+    changed = {
+        "items": [{"name": "Vesuvio", "quantity": 1}],
+        "special_requests": "",
+    }
+    place_res = M._handle_place_order_params(
+        changed,
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tool-drift",
+    )
+    payload = json.loads(place_res["result"])
+    assert payload["success"] is False
+    assert "valideras och läsas upp igen" in payload["error"]

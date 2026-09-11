@@ -93,8 +93,8 @@ def test_canonical_readback_format():
         240.0,
         special_requests="extra ost",
     )
-    assert "2 Capri" in text
-    assert "Speciellt: extra ost" in text
+    assert "Två Capri" in text
+    assert "Övrigt: extra ost" in text
     assert "Totalt: 240" in text
 
 
@@ -103,6 +103,29 @@ def test_verbal_readback_no_prices():
         [{"id": 1, "name": "Capri", "quantity": 2}],
         special_requests="extra ost",
     )
-    assert "2 Capri" in text
+    assert "Två Capri" in text
     assert "kr" not in text
-    assert "Speciellt: extra ost" in text
+    assert "Övrigt: extra ost" in text
+
+
+def test_verbal_readback_keeps_modifiers_per_item_and_service_mode():
+    text = confirmation.format_verbal_readback(
+        [
+            {
+                "id": 2,
+                "name": "Vesuvio",
+                "quantity": 1,
+                "special_requests": "familj",
+            },
+            {
+                "id": 35,
+                "name": "Kebabpizza",
+                "quantity": 1,
+                "special_requests": "mild sås",
+            },
+        ],
+        special_requests="Ta med",
+    )
+    assert text == (
+        "En Vesuvio, familj och en Kebabpizza, mild sås, för att ta med."
+    )
