@@ -138,6 +138,18 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
         "required": False,
         "default": None,
     },
+    "sas_storlek": {
+        "label": "Storlek",
+        "selection": "single",
+        "required": True,
+        "default": "Liten",
+    },
+    "extra_sas_smak": {
+        "label": "Smak",
+        "selection": "single",
+        "required": True,
+        "default": None,
+    },
     "barnportion": {
         "label": "Barn?",
         "selection": "single",
@@ -156,6 +168,9 @@ CATEGORY_GROUPS: Dict[str, List[str]] = {
 }
 
 _BARNPORTION_LABEL = "Barnportion"
+_EXTRA_SAS_ID = 101
+_RAW_OPTION_KEYS = frozenset({"sas_tillval", "sas_storlek", "extra_sas_smak"})
+_DEFAULT_EXTRA_SAS_SMAK = ["Mild", "Stark", "Vitlök", "Laktosfri"]
 
 
 def _as_int_id(value: Any) -> Optional[int]:
@@ -190,6 +205,8 @@ def dish_modifier_groups(category: str, item: dict) -> List[str]:
         return ["sas_tillval"]
     if category == "lchf":
         return ["lchf_kott", "sas_tillval"]
+    if category == "tillbehor" and _as_int_id(item.get("id")) == _EXTRA_SAS_ID:
+        return ["sas_storlek", "extra_sas_smak"]
     return []
 
 
@@ -214,6 +231,8 @@ def public_menu(menu: dict) -> dict:
                 row["price"] = priced["price"]
                 if priced.get("family") is not None:
                     row["price_family"] = priced["family"]
+                if priced.get("large") is not None:
+                    row["price_large"] = priced["large"]
             rows.append(row)
         if rows:
             out[key] = rows
@@ -265,7 +284,7 @@ CATEGORY_LABELS = {
 }
 
 
-def _option_list(vals: Any) -> List[str]:
+def _option_list(vals: Any, remap: bool = True) -> List[str]:
     if isinstance(vals, list):
         raw = vals
     elif isinstance(vals, dict):
@@ -280,15 +299,20 @@ def _option_list(vals: Any) -> List[str]:
             label = str(v.get("label") or v.get("name") or "").strip()
         else:
             label = str(v).strip()
-        if label:
-            out.append(app_prices.option_display_label(label))
+        if not label:
+            continue
+        out.append(app_prices.option_display_label(label) if remap else label)
     return out
 
 
-def _option_rows(labels: List[str], menu: Optional[dict] = None) -> List[Dict[str, Any]]:
+def _option_rows(
+    labels: List[str],
+    menu: Optional[dict] = None,
+    remap: bool = True,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for label in labels:
-        shown = app_prices.option_display_label(label)
+        shown = app_prices.option_display_label(label) if remap else str(label).strip()
         row: Dict[str, Any] = {"label": shown}
         delta = app_prices.option_delta(shown, menu)
         if delta == 0:
@@ -318,9 +342,13 @@ def _publish_group(
     selection = spec.get("selection") or "multi"
     required = bool(spec.get("required"))
     default = spec.get("default")
-    option_labels = [app_prices.option_display_label(o) for o in options]
+    if key in _RAW_OPTION_KEYS:
+        option_labels = [str(o).strip() for o in options if str(o).strip()]
+    else:
+        option_labels = [app_prices.option_display_label(o) for o in options]
     if default:
-        default = app_prices.option_display_label(default)
+        if key not in _RAW_OPTION_KEYS:
+            default = app_prices.option_display_label(default)
         if default not in option_labels:
             default = None
     return {
@@ -329,7 +357,7 @@ def _publish_group(
         "multiple": selection == "multi",
         "required": required,
         "default": default,
-        "options": _option_rows(option_labels, menu),
+        "options": _option_rows(option_labels, menu, remap=key not in _RAW_OPTION_KEYS),
     }
 
 
@@ -343,7 +371,7 @@ def public_modifiers(menu: dict) -> dict:
         raw_groups = {}
 
     for key, vals in raw_groups.items():
-        options = _option_list(vals)
+        options = _option_list(vals, remap=str(key) not in _RAW_OPTION_KEYS)
         extra = vals if isinstance(vals, dict) else None
         if key == "pizza_tillagg":
             options = [o for o in options if o.casefold() != _BARNPORTION_LABEL.casefold()]
@@ -357,6 +385,11 @@ def public_modifiers(menu: dict) -> dict:
 
     if "barnportion" not in groups:
         groups["barnportion"] = _publish_group("barnportion", [_BARNPORTION_LABEL], menu=menu)
+    if "sas_storlek" not in groups:
+        groups["sas_storlek"] = _publish_group("sas_storlek", ["Liten", "Stor"], menu=menu)
+    if "extra_sas_smak" not in groups:
+        smak = _option_list(raw_groups.get("sas_tillval"), remap=False) or list(_DEFAULT_EXTRA_SAS_SMAK)
+        groups["extra_sas_smak"] = _publish_group("extra_sas_smak", smak, menu=menu)
 
     return {
         "included": meta.get("included") or {},

@@ -141,6 +141,15 @@ def test_public_menu_scopes_modifiers_per_dish():
     lchf = public["lchf"][0]
     assert lchf["groups"] == ["lchf_kott", "sas_tillval"]
 
+    extra_sas = next(d for d in public["tillbehor"] if d["id"] == 101)
+    assert extra_sas["name"] == "Sås"
+    assert extra_sas["groups"] == ["sas_storlek", "extra_sas_smak"]
+    assert extra_sas["price"] == 10
+    assert extra_sas["price_large"] == 18
+    assert "price_family" not in extra_sas
+    mild_sas = next(d for d in public["tillbehor"] if d["id"] == 100)
+    assert mild_sas["groups"] == []
+
     mods = C.public_modifiers(menu)
     assert mods["modifiers"]["pizza_storlek"]["label"] == "Storlek"
     assert mods["modifiers"]["pizza_storlek"]["default"] == "Standard"
@@ -161,6 +170,19 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert mods["modifiers"]["barnportion"]["options"][0]["price"] == -10
     assert mods["modifiers"]["barnportion"]["label"] == "Barn?"
     assert mods["modifiers"]["pizza_tillagg"]["selection"] == "multi"
+    assert mods["modifiers"]["sas_storlek"]["label"] == "Storlek"
+    assert mods["modifiers"]["sas_storlek"]["required"] is True
+    assert mods["modifiers"]["sas_storlek"]["default"] == "Liten"
+    assert [o["label"] for o in mods["modifiers"]["sas_storlek"]["options"]] == ["Liten", "Stor"]
+    assert mods["modifiers"]["extra_sas_smak"]["label"] == "Smak"
+    assert mods["modifiers"]["extra_sas_smak"]["required"] is True
+    assert [o["label"] for o in mods["modifiers"]["extra_sas_smak"]["options"]] == [
+        "Mild",
+        "Stark",
+        "Vitlök",
+        "Laktosfri",
+    ]
+    assert mods["modifiers"]["sas_tillval"]["required"] is False
     assert "kebabtyp" in mods["category_groups"]["pizzas"]
     capricciosa = next(d for d in public["pizzas"] if d["name"] == "Capricciosa")
     assert capricciosa["price"] == 130
@@ -173,6 +195,22 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert C.CATEGORY_LABELS["sallader"] == "Sallader"
 
 
+def test_extra_sas_groups_exist_without_menu_meta():
+    mods = C.public_modifiers({"_meta": {"modifiers": {"saser": ["Mild"]}}})
+    assert mods["modifiers"]["sas_storlek"]["default"] == "Liten"
+    assert [o["label"] for o in mods["modifiers"]["extra_sas_smak"]["options"]] == [
+        "Mild",
+        "Stark",
+        "Vitlök",
+        "Laktosfri",
+    ]
+    public = C.public_menu({
+        "tillbehor": [{"id": 101, "name": "Extra sås", "description": ""}],
+    })
+    assert public["tillbehor"][0]["groups"] == ["sas_storlek", "extra_sas_smak"]
+    assert public["tillbehor"][0]["price_large"] == 18
+
+
 def test_server_prices_ignore_client_and_use_qopla():
     import json
     from pathlib import Path
@@ -182,3 +220,7 @@ def test_server_prices_ignore_client_and_use_qopla():
     assert C.unit_price(1, "Familj, Glutenfri botten", menu) == 350
     assert C.unit_price(1, "standard, extra ost", menu) == 145
     assert C.unit_price(54, "Pommes", menu) == 155
+    assert C.unit_price(101, "Liten, Mild", menu) == 10
+    assert C.unit_price(101, "Stor, Mild", menu) == 18
+    assert C.unit_price(101, "Stor, Vitlök", menu) == 18
+    assert C.unit_price(101, "Mild", menu) == 10

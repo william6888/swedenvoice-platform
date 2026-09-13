@@ -36,7 +36,9 @@
       ],
       "kebabrulle_tillagg": ["Pommes", "Glutenfri", "Barnportion"],
       "lchf_kott": ["Kebabkött", "Kyckling", "Fläskfilé"],
-      "sas_tillval": ["Mild", "Stark", "Vitlök", "Laktosfri"]
+      "sas_tillval": ["Mild", "Stark", "Vitlök", "Laktosfri"],
+      "sas_storlek": ["Liten", "Stor"],
+      "extra_sas_smak": ["Mild", "Stark", "Vitlök", "Laktosfri"]
     },
     "gluten": {
       "glutenfri_mojlig": "Alla pizzor och rullar kan fås med glutenfri botten (säg till).",

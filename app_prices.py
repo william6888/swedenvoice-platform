@@ -41,6 +41,9 @@ DISH_STANDARD: Dict[int, int] = {
 
 PIZZA_IDS = set(range(1, 53))
 
+# Extra sås Stor på Qopla 2026-09-13. Inte pizza-familj (2×+60).
+DISH_LARGE: Dict[int, int] = {101: 18}
+
 # Visningsnamn som på Qopla. menu.json behåller röstalias.
 DISPLAY_NAMES: Dict[int, str] = {
     49: "Ibbe-Special",
@@ -60,6 +63,7 @@ DISPLAY_NAMES: Dict[int, str] = {
     89: "Bamse i bröd",
     90: "Bamse med strips/mos",
     91: "Bamse med strips/mos",
+    101: "Sås",
     105: "2liter",
 }
 
@@ -128,7 +132,16 @@ OPTION_DISPLAY: Dict[str, str] = {
     "stark": "Stark sås",
 }
 
-_SIZE_LABELS = {"standard", "vanlig", "familj", "family", "vanligt bröd", "vanligt bröd!"}
+_SIZE_LABELS = {
+    "standard",
+    "vanlig",
+    "familj",
+    "family",
+    "vanligt bröd",
+    "vanligt bröd!",
+    "liten",
+    "stor",
+}
 
 
 def _fold(value: str) -> str:
@@ -160,6 +173,9 @@ def dish_prices(item_id: Any, menu: Optional[dict] = None) -> Optional[Dict[str,
     out = {"price": int(standard)}
     if parsed in PIZZA_IDS:
         out["family"] = family_price(standard)
+    large = DISH_LARGE.get(parsed)
+    if large is not None:
+        out["large"] = int(large)
     return out
 
 
@@ -197,7 +213,12 @@ def unit_price(item_id: Any, selected: Iterable[str], menu: Optional[dict] = Non
         return None
     labels = [str(x).strip() for x in selected if str(x).strip()]
     folded = {_fold(x) for x in labels}
-    unit = float(info["family"] if ("familj" in folded or "family" in folded) and info.get("family") else info["price"])
+    if "stor" in folded and info.get("large") is not None:
+        unit = float(info["large"])
+    elif ("familj" in folded or "family" in folded) and info.get("family"):
+        unit = float(info["family"])
+    else:
+        unit = float(info["price"])
     for label in labels:
         if _fold(label) in _SIZE_LABELS:
             continue
@@ -237,4 +258,12 @@ def _override_dish(menu: Optional[dict], item_id: int) -> Optional[Dict[str, int
             pass
     elif item_id in PIZZA_IDS:
         out["family"] = family_price(price)
+    large = raw.get("large")
+    if large is not None:
+        try:
+            out["large"] = int(large)
+        except (TypeError, ValueError):
+            pass
+    elif item_id in DISH_LARGE:
+        out["large"] = int(DISH_LARGE[item_id])
     return out
