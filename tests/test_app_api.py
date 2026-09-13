@@ -39,6 +39,7 @@ def _patch_app(monkeypatch, tmp_path):
     main.save_orders([])
     main._MENU_CACHE.clear()
     app_channel.reset_stores()
+    app_channel.configure_persistence(db)
     return db
 
 
@@ -63,13 +64,14 @@ def test_app_menu_is_public_and_has_cors(monkeypatch, tmp_path):
             assert "aliases" not in vesuvio
             assert "kebabrulle_tillagg" not in vesuvio["groups"]
             assert "lchf_kott" not in vesuvio["groups"]
-            assert "kebabtyp" in vesuvio["groups"]
+            assert "kebabtyp" not in vesuvio["groups"]
             assert vesuvio["price"] == 130
             assert vesuvio["price_family"] == 320
             assert body["category_labels"]["pizzas"] == "Pizza"
             assert body["modifiers"]["modifiers"]["pizza_storlek"]["label"] == "Storlek"
             assert body["modifiers"]["modifiers"]["pizza_storlek"]["default"] == "Standard"
-            assert body["modifiers"]["modifiers"]["pizza_botten"]["label"] == "Smak"
+            assert body["modifiers"]["modifiers"]["pizza_botten"]["label"] == "Botten"
+            assert all(d["id"] != 62 for d in body["categories"].get("sallader", []))
             extra = next(
                 o for o in body["modifiers"]["modifiers"]["pizza_tillagg"]["options"]
                 if o["label"] == "Extra Ost"
@@ -225,6 +227,131 @@ def test_app_order_uses_server_qopla_price(monkeypatch, tmp_path):
     _run(check())
     rows = db.get_orders()
     assert rows[0]["items"][0]["price"] == 350
+
+
+def test_sauce_without_smak_is_rejected(monkeypatch, tmp_path):
+    _patch_app(monkeypatch, tmp_path)
+    ok, _, code = app_channel.request_otp("+46701234567", "4.4.4.4")
+    assert ok
+
+    async def check():
+        async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
+            verify = await client.post(
+                "/app/otp/verify",
+                json={"phone": "0701234567", "code": code},
+            )
+            session = verify.json()["session"]
+            response = await client.post(
+                "/app/orders",
+                headers={"X-App-Session": session},
+                json={
+                    "customer_name": "Anna",
+                    "service_mode": "takeaway",
+                    "client_request_id": "sas-utan-smak",
+                    "items": [{"id": 101, "name": "Extra sås", "quantity": 1, "notes": "Stor"}],
+                },
+            )
+            assert response.status_code == 422
+            assert "Smak" in response.json()["error"]
+
+    _run(check())
+
+
+def test_unpriced_dish_rejected(monkeypatch, tmp_path):
+    _patch_app(monkeypatch, tmp_path)
+    ok, _, code = app_channel.request_otp("+46701234567", "5.5.5.5")
+    assert ok
+
+    async def check():
+        async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
+            verify = await client.post(
+                "/app/otp/verify",
+                json={"phone": "0701234567", "code": code},
+            )
+            session = verify.json()["session"]
+            response = await client.post(
+                "/app/orders",
+                headers={"X-App-Session": session},
+                json={
+                    "customer_name": "Anna",
+                    "service_mode": "takeaway",
+                    "client_request_id": "grekisk-0kr",
+                    "items": [{"id": 62, "name": "Grekisk sallad", "quantity": 1}],
+                },
+            )
+            assert response.status_code == 422
+
+    _run(check())
+
+
+def test_reviewer_otp_skips_sms(monkeypatch, tmp_path):
+    _patch_app(monkeypatch, tmp_path)
+    monkeypatch.setenv("APP_REVIEW_PHONE", "0701112233")
+    monkeypatch.setenv("APP_REVIEW_CODE", "112233")
+    sent = []
+
+    def capture(to, body):
+        sent.append(body)
+        return {"ok": True, "to": to}
+
+    monkeypatch.setattr(main, "_sms_sender_for_worker", capture)
+
+    async def check():
+        async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
+            asked = await client.post("/app/otp/request", json={"phone": "0701112233"})
+            assert asked.status_code == 200
+            verify = await client.post(
+                "/app/otp/verify",
+                json={"phone": "0701112233", "code": "112233"},
+            )
+            assert verify.status_code == 200
+            assert verify.json()["session"]
+
+    _run(check())
+    assert sent == []
+
+
+def test_privacy_delete_anonymizes_app_orders(monkeypatch, tmp_path):
+    db = _patch_app(monkeypatch, tmp_path)
+    db.tables["orders"] = [
+        {
+            "id": "ord-1",
+            "source": "app",
+            "customer_name": "Anna",
+            "customer_phone": "+46701234567",
+            "sms_to": "+46701234567",
+        },
+        {
+            "id": "ord-2",
+            "source": "vapi",
+            "customer_name": "Anna",
+            "customer_phone": "+46701234567",
+            "sms_to": "+46701234567",
+        },
+    ]
+    ok, _, code = app_channel.request_otp("+46701234567", "6.6.6.6")
+    assert ok
+
+    async def check():
+        async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
+            verify = await client.post(
+                "/app/otp/verify",
+                json={"phone": "0701234567", "code": code},
+            )
+            session = verify.json()["session"]
+            response = await client.post(
+                "/app/privacy/delete",
+                headers={"X-App-Session": session},
+            )
+            assert response.status_code == 200
+            assert response.json()["updated"] == 1
+
+    _run(check())
+    app_row = next(r for r in db.tables["orders"] if r["id"] == "ord-1")
+    voice_row = next(r for r in db.tables["orders"] if r["id"] == "ord-2")
+    assert app_row["customer_name"] == "Raderad"
+    assert app_row["customer_phone"] == ""
+    assert voice_row["customer_phone"] == "+46701234567"
 
 
 def test_landline_cannot_request_otp(monkeypatch, tmp_path):

@@ -143,7 +143,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-13-kundapp-v5"
+BUILD_TAG = "2026-09-13-kundapp-v6"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -375,6 +375,7 @@ async def startup_debug():
     print(f"REQUIRE_DRAFT_TOKEN: {REQUIRE_DRAFT_TOKEN} (Vapi MÅSTE anropa /draft_order innan /place_order när detta är true)")
     # Kontrollera att vi kan läsa restaurants (RLS kräver service_role; anon får 0 rader)
     if _supabase_client:
+        app_channel.configure_persistence(_supabase_client)
         try:
             r = _supabase_client.table("restaurants").select("id").limit(1).execute()
             if not (r.data and len(r.data) > 0):
@@ -1572,7 +1573,11 @@ def _get_tenant_branding(rest_id: Optional[str]) -> Dict[str, str]:
     }
 
 
-def _format_order_sms(order: Order, branding: Optional[Dict[str, str]] = None) -> str:
+def _format_order_sms(
+    order: Order,
+    branding: Optional[Dict[str, str]] = None,
+    include_checkout: bool = False,
+) -> str:
     """
     Formatera beställning till SMS-text. branding = {name, contact_phone} per tenant,
     så pizzeria nr 2 inte skickar "från Gislegrillen" med fel telefonnummer.
@@ -1586,6 +1591,10 @@ def _format_order_sms(order: Order, branding: Optional[Dict[str, str]] = None) -
     brand_name = (b.get("name") or "").strip() or "Gislegrillen"
     contact = (b.get("contact_phone") or "").strip() or "+46760445700"
     lines = [f"Hej! Detta är din orderbekräftelse från {brand_name}.", ""]
+    order_id = (getattr(order, "order_id", None) or "").strip()
+    if order_id:
+        lines.append(f"Ordernummer: {order_id}")
+        lines.append("")
     per_item_seen: List[str] = []
     for item in order.items:
         part = f"{item.quantity}x {item.name}"
@@ -1598,6 +1607,14 @@ def _format_order_sms(order: Order, branding: Optional[Dict[str, str]] = None) -
     if top_level and top_level not in per_item_seen:
         lines.append("")
         lines.append(f"Önskemål: {top_level}")
+    if include_checkout:
+        total = getattr(order, "total_price", None)
+        if total is not None:
+            try:
+                lines.extend(["", f"Totalt {int(round(float(total)))} kr"])
+            except (TypeError, ValueError):
+                pass
+        lines.append("Betala på plats.")
     lines.extend(["", f"Är din beställning felaktig? Ring oss: {contact}"])
     return "\n".join(lines)
 
@@ -1696,7 +1713,12 @@ def send_sms_order_confirmation(order: Order, to_number: str, branding: Optional
     return _send_sms_order_confirmation_result(order, to_number, branding)["ok"]
 
 
-def _send_sms_order_confirmation_result(order: Order, to_number: str, branding: Optional[Dict[str, str]] = None) -> dict:
+def _send_sms_order_confirmation_result(
+    order: Order,
+    to_number: str,
+    branding: Optional[Dict[str, str]] = None,
+    include_checkout: bool = False,
+) -> dict:
     """Skicka SMS och returnera strukturerad status för Supabase-spårning."""
     to = _normalize_phone_for_sms(to_number)
     if not to:
@@ -1709,7 +1731,7 @@ def _send_sms_order_confirmation_result(order: Order, to_number: str, branding: 
         print("⚠️  Vonage not configured. Skipping SMS.")
         return {"ok": False, "to": to, "error": "vonage_not_configured"}
     print(f"DEBUG SMS: Vonage config OK, calling API for to_number={to_number}")
-    text = _format_order_sms(order, branding)
+    text = _format_order_sms(order, branding, include_checkout=include_checkout)
     try:
         r = httpx.post(
             "https://rest.nexmo.com/sms/json",
@@ -2544,6 +2566,7 @@ def _run_sms_and_alert_on_failure(
     customer_phone: Optional[str],
     rest_id: str,
     db_order_id: Optional[str] = None,
+    include_checkout: bool = False,
 ) -> None:
     """Körs i bakgrunden: skicka SMS; vid fel skicka alert till admin. Tar order som dict (order.model_dump())."""
     try:
@@ -2553,7 +2576,9 @@ def _run_sms_and_alert_on_failure(
         _send_sms_failure_alert(rest_id, order_dict.get("order_id", "?"), str(e))
         return
     branding = _get_tenant_branding(rest_id)
-    result = _send_sms_order_confirmation_result(order, customer_phone or "", branding)
+    result = _send_sms_order_confirmation_result(
+        order, customer_phone or "", branding, include_checkout=include_checkout
+    )
     if result["ok"]:
         _update_order_sms_status(db_order_id, order.order_id, "sent", result.get("to", ""), "")
         return
@@ -2577,7 +2602,7 @@ def _run_sms_and_alert_on_failure(
                 order_id=order.order_id,
                 db_order_id=db_order_id,
                 to_number=customer_phone or "",
-                body=_format_order_sms(order, branding),
+                body=_format_order_sms(order, branding, include_checkout=include_checkout),
             )
         except Exception as e:
             print(f"⚠️  queue_sms_job after failure soft-fail: {e}")
@@ -2588,9 +2613,16 @@ def send_customer_sms_now(
     customer_phone: Optional[str],
     rest_id: str,
     db_order_id: Optional[str] = None,
+    include_checkout: bool = False,
 ) -> None:
     """Skicka SMS synkront (samma HTTP-request som ordern). Bakgrundstasker kan annars hinner inte köras klart."""
-    _run_sms_and_alert_on_failure(order.model_dump(), customer_phone, rest_id, db_order_id)
+    _run_sms_and_alert_on_failure(
+        order.model_dump(),
+        customer_phone,
+        rest_id,
+        db_order_id,
+        include_checkout=include_checkout,
+    )
 
 
 def _token_bucket_allow(rest_id: str) -> bool:
@@ -2802,6 +2834,8 @@ async def app_otp_request(payload: AppOtpRequest, request: Request):
     ok, err, code = app_channel.request_otp(phone, _app_client_ip(request))
     if not ok or not code:
         return _app_json_error(429, err or "För många försök. Vänta en stund.")
+    if app_channel.is_reviewer_phone(phone):
+        return {"ok": True, "phone": phone}
     sent = _sms_sender_for_worker(phone, app_channel.otp_sms_text(code))
     if not sent.get("ok"):
         print(f"app_otp: SMS misslyckades phone={phone} err={sent.get('error')}")
@@ -2862,16 +2896,32 @@ async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Option
         )
 
     menu = get_menu_cached(effective_rest_id)
+    published = (app_channel.public_modifiers(menu) or {}).get("modifiers") or {}
     try:
         items = []
         for it in resolved_items:
             notes = it.get("special_requests")
+            category = app_channel.category_for_item(menu, it.get("id"), it.get("name") or "")
+            menu_item = {"id": it.get("id"), "name": it.get("name"), "description": it.get("description") or ""}
+            if category:
+                missing = app_channel.missing_required_groups(category, menu_item, notes, published)
+                if missing:
+                    return _app_json_error(
+                        422,
+                        f"Välj { ' och '.join(missing) } för {it.get('name') or 'rätten'}.",
+                    )
+            price = app_channel.unit_price(it["id"], notes, menu)
+            if price is None:
+                return _app_json_error(
+                    422,
+                    f"{it.get('name') or 'Rätten'} kan inte beställas online just nu.",
+                )
             items.append(
                 OrderItem(
                     id=it["id"],
                     name=it["name"],
                     quantity=it.get("quantity") or 1,
-                    price=app_channel.unit_price(it["id"], notes, menu),
+                    price=price,
                     special_requests=notes,
                 )
             )
@@ -2921,7 +2971,13 @@ async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Option
             needs_human_review=bool(commit.get("needs_human_review")),
         )
         if not commit.get("needs_human_review"):
-            send_customer_sms_now(sms_order, phone, effective_rest_id, commit.get("db_order_id"))
+            send_customer_sms_now(
+                sms_order,
+                phone,
+                effective_rest_id,
+                commit.get("db_order_id"),
+                include_checkout=True,
+            )
 
     return {
         "ok": True,
@@ -2931,6 +2987,33 @@ async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Option
         "total_price": commit.get("total_price"),
         "replay": bool(commit.get("idempotent_replay")),
     }
+
+
+@app.post("/app/privacy/delete")
+async def app_privacy_delete(request: Request):
+    """Anonymiserar kundens app-ordrar. Kräver SMS-session. Ingen radering via restaurangbesök."""
+    phone = _app_require_session_phone(request)
+    updated = 0
+    if _supabase_client:
+        try:
+            resp = (
+                _supabase_client.table("orders")
+                .update(
+                    {
+                        "customer_name": "Raderad",
+                        "customer_phone": "",
+                        "sms_to": "",
+                    }
+                )
+                .eq("customer_phone", phone)
+                .eq("source", "app")
+                .execute()
+            )
+            updated = len(resp.data or [])
+        except Exception as exc:
+            print(f"app_privacy_delete skip: {exc}")
+            return _app_json_error(503, "Kunde inte radera uppgifterna just nu. Försök igen.")
+    return {"ok": True, "updated": updated}
 
 
 @app.post("/match_menu")

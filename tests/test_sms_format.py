@@ -80,3 +80,13 @@ def test_per_tenant_branding_in_sms():
     assert "+46701112233" in text
     assert "Gislegrillen" not in text
     assert "+46760445700" not in text
+
+
+def test_app_checkout_sms_has_total_and_pay_at_pickup():
+    order = _order([M.OrderItem(id=1, name="Sås", quantity=1, price=18.0)])
+    text = M._format_order_sms(order, include_checkout=True)
+    assert "Ordernummer: ORD-TEST" in text
+    assert "Totalt 100 kr" in text
+    assert "Betala på plats." in text
+    voice = M._format_order_sms(order)
+    assert "Betala på plats." not in voice

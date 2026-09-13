@@ -105,6 +105,30 @@ körschema i **ONBOARDING_NY_PIZZERIA.md**.
 
 ---
 
+## Kundapp (Lovable, inte köket)
+
+Live: `https://gislegrillen.lovable.app` — projekt `0200f18e-bc5f-468c-a067-cd05dbf0d446`.
+Köket är `https://swedenvoice.lovable.app` och rörs inte.
+
+API (`main.py` `/app/*`, `app_channel.py`, `app_prices.py`):
+- `GET /app/info`, `GET /app/menu`, `POST /app/otp/request|verify`, `POST /app/orders`, `POST /app/privacy/delete`
+- Session TTL 7 dagar. OTP i tabellen `app_otp` (service_role). Reviewer: `APP_REVIEW_PHONE` + `APP_REVIEW_CODE` (Railway-env, inget SMS).
+- Extra sås (101): Liten 10 / Stor 18. `pizza_botten` heter **Botten**. `kebabtyp` bara på rätter med kebabkött.
+- Rätter utan Qopla-pris döljs i kundmenyn och nekas på `/app/orders`.
+- App-SMS: ordernummer, totalt, “Betala på plats.”
+
+## App Store (förberett, inte inlämnat)
+
+Kostar 99 USD/år — görs **inte** nu. PWA räcker som hemskärms-app (Safari Dela → Lägg till på hemskärmen).
+
+Kvar den dagen ni lämnar in:
+- Apple Developer i Gislegrillens/företagets namn (org kräver D-U-N-S).
+- Capacitor/Median-binär + Xcode + PrivacyInfo.xcprivacy. En URL går inte att ladda upp (guideline 4.2).
+- Native värde utöver Safari: APNs-push, offline (finns redan), ev. tabbar/widget.
+- App Store Connect: integritetspolicy-URL (`/integritet`), nutrition labels, svenska+engelska screenshots (6.7"/6.5"/iPad), support-URL, åldersgräns, review notes med `APP_REVIEW_PHONE`/`APP_REVIEW_CODE`.
+- 5.1.1(v) radering i appen (finns). 3.1.3(e) mat = inte IAP; betala på plats är tillåtet.
+- Ingen Google Play i v1. Ingen Lovable-badge.
+
 ## När du hjälper i en ny chatt
 
 - Använd denna fil som källa till sanning för omfattning, filer och flöde.
