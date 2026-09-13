@@ -143,7 +143,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-13-kundapp-v2"
+BUILD_TAG = "2026-09-13-kundapp-v3"
 
 # Initialize FastAPI app
 app = FastAPI(

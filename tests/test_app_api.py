@@ -59,7 +59,10 @@ def test_app_menu_is_public_and_has_cors(monkeypatch, tmp_path):
             assert "aliases" not in vesuvio
             assert "kebabrulle_tillagg" not in vesuvio["groups"]
             assert "lchf_kott" not in vesuvio["groups"]
+            assert "kebabtyp" in vesuvio["groups"]
             assert body["modifiers"]["modifiers"]["pizza_storlek"]["label"] == "Storlek"
+            assert body["modifiers"]["modifiers"]["pizza_storlek"]["default"] == "Standard"
+            assert body["modifiers"]["modifiers"]["pizza_botten"]["label"] == "Smak"
             assert menu.headers.get("access-control-allow-origin") == "*"
 
     _run(check())

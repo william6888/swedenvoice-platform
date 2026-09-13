@@ -82,6 +82,7 @@ def test_compose_special_requests_and_menu_strip():
     assert public["pizzas"][0]["groups"] == [
         "pizza_storlek",
         "pizza_botten",
+        "kebabtyp",
         "pizza_tillagg",
         "barnportion",
     ]
@@ -103,13 +104,13 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert vesuvio["groups"] == [
         "pizza_storlek",
         "pizza_botten",
+        "kebabtyp",
         "pizza_tillagg",
         "barnportion",
     ]
     assert "kebabrulle_tillagg" not in vesuvio["groups"]
     assert "lchf_kott" not in vesuvio["groups"]
     assert "saser" not in vesuvio["groups"]
-    assert "kebabtyp" not in vesuvio["groups"]
 
     kebabpizza = next(d for d in public["pizzas"] if d["name"] == "Kebabpizza")
     assert "kebabtyp" in kebabpizza["groups"]
@@ -117,7 +118,8 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert "kebabrulle_tillagg" not in kebabpizza["groups"]
 
     alex = next(d for d in public["pizzas"] if "Alex" in d["name"] or "ALEX" in d["name"])
-    assert "kebabtyp" not in alex["groups"]
+    assert "kebabtyp" in alex["groups"]
+    assert "kebabrulle_tillagg" not in alex["groups"]
 
     rulle = next(d for d in public["kebabs"] if d["name"] == "Kebabrulle")
     assert "pizza_storlek" not in rulle["groups"]
@@ -141,10 +143,15 @@ def test_public_menu_scopes_modifiers_per_dish():
 
     mods = C.public_modifiers(menu)
     assert mods["modifiers"]["pizza_storlek"]["label"] == "Storlek"
-    assert mods["modifiers"]["pizza_storlek"]["default"] == "Vanlig"
+    assert mods["modifiers"]["pizza_storlek"]["default"] == "Standard"
+    assert mods["modifiers"]["pizza_storlek"]["options"][0] == "Standard"
     assert mods["modifiers"]["pizza_storlek"]["required"] is True
+    assert mods["modifiers"]["pizza_botten"]["label"] == "Smak"
+    assert mods["modifiers"]["pizza_tillagg"]["label"] == "Extra topping"
     assert "Barnportion" not in mods["modifiers"]["pizza_tillagg"]["options"]
+    assert "Extra fläskfilé" in mods["modifiers"]["pizza_tillagg"]["options"]
     assert "Barnportion" not in mods["modifiers"]["kebabrulle_tillagg"]["options"]
     assert mods["modifiers"]["barnportion"]["options"] == ["Barnportion"]
+    assert mods["modifiers"]["barnportion"]["label"] == "Barn?"
     assert mods["modifiers"]["pizza_tillagg"]["selection"] == "multi"
-    assert "pizzas" in mods["category_groups"]
+    assert "kebabtyp" in mods["category_groups"]["pizzas"]
