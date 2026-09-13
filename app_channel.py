@@ -79,8 +79,136 @@ def opening_hours_label() -> str:
     return "Mån–tors 11–21, fre–lör 11–22, sön 11–21"
 
 
+# Rulle-tillägg (pommes/glutenfri) bara på dessa, inte på pizza.
+_RULLE_ITEM_IDS = {54, 59}
+
+# Kebabtyp på kebab-rätter och pizzor som faktiskt har kebabkött — inte på Vesuvio.
+_KEBAB_PIZZA_IDS = {35, 36, 37, 38, 39, 40, 41, 49, 51, 52}
+
+# Svenska etiketter + regler. options kommer från menu.json (_meta.modifiers).
+GROUP_META: Dict[str, Dict[str, Any]] = {
+    "pizza_storlek": {
+        "label": "Storlek",
+        "selection": "single",
+        "required": True,
+        "default": "Vanlig",
+    },
+    "pizza_botten": {
+        "label": "Botten",
+        "selection": "single",
+        "required": True,
+        "default": "Vanlig botten",
+    },
+    "kebabtyp": {
+        "label": "Kebabtyp",
+        "selection": "single",
+        "required": False,
+        "default": None,
+    },
+    "saser": {
+        "label": "Sås",
+        "selection": "single",
+        "required": True,
+        "default": None,
+    },
+    "pizza_tillagg": {
+        "label": "Extra",
+        "selection": "multi",
+        "required": False,
+        "default": None,
+    },
+    "kebabrulle_tillagg": {
+        "label": "Tillval",
+        "selection": "multi",
+        "required": False,
+        "default": None,
+    },
+    "lchf_kott": {
+        "label": "Kött",
+        "selection": "single",
+        "required": True,
+        "default": None,
+    },
+    "sas_tillval": {
+        "label": "Sås",
+        "selection": "single",
+        "required": False,
+        "default": None,
+    },
+    "barnportion": {
+        "label": "Barnportion",
+        "selection": "single",
+        "required": False,
+        "default": None,
+    },
+}
+
+# Fallback om en äldre klient inte läser dish.groups.
+CATEGORY_GROUPS: Dict[str, List[str]] = {
+    "pizzas": ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"],
+    "kebabs": ["kebabtyp", "saser", "barnportion"],
+    "kyckling": ["saser", "barnportion"],
+    "sallader": ["sas_tillval"],
+    "lchf": ["lchf_kott", "sas_tillval"],
+}
+
+_BARNPORTION_LABEL = "Barnportion"
+
+
+def _as_int_id(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dish_has_kebab_meat(item: dict) -> bool:
+    """True om rätten är kebabkött — inte bara kebabsås på kycklingpizza."""
+    item_id = _as_int_id(item.get("id"))
+    if item_id in _KEBAB_PIZZA_IDS:
+        return True
+    name = str(item.get("name") or "")
+    desc = str(item.get("description") or "")
+    blob = f"{name} {desc}".casefold()
+    if "kebabkött" in blob:
+        return True
+    name_l = name.casefold()
+    return "kebab" in name_l and "sås" not in name_l
+
+
+def _is_rulle(item: dict) -> bool:
+    item_id = _as_int_id(item.get("id"))
+    if item_id in _RULLE_ITEM_IDS:
+        return True
+    return "rulle" in str(item.get("name") or "").casefold()
+
+
+def dish_modifier_groups(category: str, item: dict) -> List[str]:
+    """Tillvalsgrupper som hör till just den här rätten."""
+    if category == "pizzas":
+        groups = ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"]
+        if _dish_has_kebab_meat(item):
+            groups.insert(2, "kebabtyp")
+        return groups
+    if category == "kebabs":
+        groups = ["kebabtyp", "saser", "barnportion"]
+        if _is_rulle(item):
+            groups.insert(2, "kebabrulle_tillagg")
+        return groups
+    if category == "kyckling":
+        groups = ["saser", "barnportion"]
+        if _is_rulle(item):
+            groups.insert(1, "kebabrulle_tillagg")
+        return groups
+    if category == "sallader":
+        return ["sas_tillval"]
+    if category == "lchf":
+        return ["lchf_kott", "sas_tillval"]
+    return []
+
+
 def public_menu(menu: dict) -> dict:
-    """Meny till appen: inga alias/id-kartor som inte behövs, behåll id+namn+beskrivning."""
+    """Meny till appen: id, namn, beskrivning och tillvalsgrupper för just den rätten."""
     out: Dict[str, list] = {}
     for key, items in (menu or {}).items():
         if key.startswith("_") or not isinstance(items, list):
@@ -93,6 +221,7 @@ def public_menu(menu: dict) -> dict:
                 "id": it.get("id"),
                 "name": it["name"],
                 "description": it.get("description") or "",
+                "groups": dish_modifier_groups(key, it),
             })
         if rows:
             out[key] = rows
@@ -144,21 +273,79 @@ CATEGORY_LABELS = {
 }
 
 
+def _option_list(vals: Any) -> List[str]:
+    if isinstance(vals, list):
+        raw = vals
+    elif isinstance(vals, dict):
+        raw = vals.get("options") or vals.get("values") or []
+    else:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for v in raw:
+        if isinstance(v, dict):
+            label = str(v.get("label") or v.get("name") or "").strip()
+        else:
+            label = str(v).strip()
+        if label:
+            out.append(label)
+    return out
+
+
+def _publish_group(key: str, options: List[str], extra: Optional[dict] = None) -> Dict[str, Any]:
+    spec = dict(GROUP_META.get(key) or {})
+    if extra:
+        for field in ("label", "selection", "required", "default"):
+            if field in extra and extra[field] is not None:
+                spec[field] = extra[field]
+        if extra.get("multiple") is True:
+            spec["selection"] = "multi"
+        elif extra.get("multiple") is False:
+            spec["selection"] = "single"
+    label = spec.get("label") or key.replace("_", " ")
+    selection = spec.get("selection") or "multi"
+    required = bool(spec.get("required"))
+    default = spec.get("default")
+    if default and default not in options:
+        default = None
+    return {
+        "label": label,
+        "selection": selection,
+        "multiple": selection == "multi",
+        "required": required,
+        "default": default,
+        "options": options,
+    }
+
+
 def public_modifiers(menu: dict) -> dict:
     meta = (menu or {}).get("_meta") if isinstance(menu, dict) else {}
     if not isinstance(meta, dict):
         meta = {}
     groups: Dict[str, Any] = {}
     raw_groups = meta.get("modifiers") or {}
-    if isinstance(raw_groups, dict):
-        for key, vals in raw_groups.items():
-            if isinstance(vals, list):
-                groups[str(key)] = {"options": [str(v) for v in vals if str(v).strip()]}
-            elif isinstance(vals, dict):
-                groups[str(key)] = vals
+    if not isinstance(raw_groups, dict):
+        raw_groups = {}
+
+    for key, vals in raw_groups.items():
+        options = _option_list(vals)
+        extra = vals if isinstance(vals, dict) else None
+        if key == "pizza_tillagg":
+            options = [o for o in options if o.casefold() != _BARNPORTION_LABEL.casefold()]
+        elif key == "kebabrulle_tillagg":
+            options = [o for o in options if o.casefold() != _BARNPORTION_LABEL.casefold()]
+        if not options:
+            continue
+        groups[str(key)] = _publish_group(str(key), options, extra)
+
+    if "barnportion" not in groups:
+        groups["barnportion"] = _publish_group("barnportion", [_BARNPORTION_LABEL])
+
     return {
         "included": meta.get("included") or {},
         "modifiers": groups,
+        "category_groups": dict(CATEGORY_GROUPS),
         "gluten": meta.get("gluten") or {},
         "service_options": meta.get("service_options") or ["Ta med", "Äta här"],
     }

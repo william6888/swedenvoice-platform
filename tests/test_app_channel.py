@@ -75,9 +75,76 @@ def test_compose_special_requests_and_menu_strip():
         "pizzas": [{"id": 1, "name": "Margherita", "aliases": ["margarita"], "description": "Ost"}],
         "empty": [],
     })
-    assert public["pizzas"][0] == {"id": 1, "name": "Margherita", "description": "Ost"}
+    assert public["pizzas"][0]["id"] == 1
+    assert public["pizzas"][0]["name"] == "Margherita"
+    assert public["pizzas"][0]["description"] == "Ost"
     assert "aliases" not in public["pizzas"][0]
+    assert public["pizzas"][0]["groups"] == [
+        "pizza_storlek",
+        "pizza_botten",
+        "pizza_tillagg",
+        "barnportion",
+    ]
     mods = C.public_modifiers({
         "_meta": {"modifiers": {"saser": ["Mild", "Stark"]}},
     })
     assert mods["modifiers"]["saser"]["options"] == ["Mild", "Stark"]
+    assert mods["modifiers"]["saser"]["label"] == "Sås"
+    assert mods["modifiers"]["saser"]["selection"] == "single"
+
+
+def test_public_menu_scopes_modifiers_per_dish():
+    import json
+    from pathlib import Path
+
+    menu = json.loads(Path("menu.json").read_text(encoding="utf-8"))
+    public = C.public_menu(menu)
+    vesuvio = next(d for d in public["pizzas"] if d["name"] == "Vesuvio")
+    assert vesuvio["groups"] == [
+        "pizza_storlek",
+        "pizza_botten",
+        "pizza_tillagg",
+        "barnportion",
+    ]
+    assert "kebabrulle_tillagg" not in vesuvio["groups"]
+    assert "lchf_kott" not in vesuvio["groups"]
+    assert "saser" not in vesuvio["groups"]
+    assert "kebabtyp" not in vesuvio["groups"]
+
+    kebabpizza = next(d for d in public["pizzas"] if d["name"] == "Kebabpizza")
+    assert "kebabtyp" in kebabpizza["groups"]
+    assert "pizza_storlek" in kebabpizza["groups"]
+    assert "kebabrulle_tillagg" not in kebabpizza["groups"]
+
+    alex = next(d for d in public["pizzas"] if "Alex" in d["name"] or "ALEX" in d["name"])
+    assert "kebabtyp" not in alex["groups"]
+
+    rulle = next(d for d in public["kebabs"] if d["name"] == "Kebabrulle")
+    assert "pizza_storlek" not in rulle["groups"]
+    assert "lchf_kott" not in rulle["groups"]
+    assert "kebabrulle_tillagg" in rulle["groups"]
+    assert "kebabtyp" in rulle["groups"]
+    assert "saser" in rulle["groups"]
+
+    bread = next(d for d in public["kebabs"] if d["name"] == "Kebab med bröd")
+    assert "kebabrulle_tillagg" not in bread["groups"]
+    assert "kebabtyp" in bread["groups"]
+
+    drink = public["drycker"][0]
+    assert drink["groups"] == []
+
+    burger = public["hamburgare"][0]
+    assert burger["groups"] == []
+
+    lchf = public["lchf"][0]
+    assert lchf["groups"] == ["lchf_kott", "sas_tillval"]
+
+    mods = C.public_modifiers(menu)
+    assert mods["modifiers"]["pizza_storlek"]["label"] == "Storlek"
+    assert mods["modifiers"]["pizza_storlek"]["default"] == "Vanlig"
+    assert mods["modifiers"]["pizza_storlek"]["required"] is True
+    assert "Barnportion" not in mods["modifiers"]["pizza_tillagg"]["options"]
+    assert "Barnportion" not in mods["modifiers"]["kebabrulle_tillagg"]["options"]
+    assert mods["modifiers"]["barnportion"]["options"] == ["Barnportion"]
+    assert mods["modifiers"]["pizza_tillagg"]["selection"] == "multi"
+    assert "pizzas" in mods["category_groups"]

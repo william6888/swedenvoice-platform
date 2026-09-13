@@ -55,7 +55,11 @@ def test_app_menu_is_public_and_has_cors(monkeypatch, tmp_path):
             body = menu.json()
             assert body["ok"] is True
             assert "pizzas" in body["categories"]
-            assert "aliases" not in body["categories"]["pizzas"][0]
+            vesuvio = next(d for d in body["categories"]["pizzas"] if d["name"] == "Vesuvio")
+            assert "aliases" not in vesuvio
+            assert "kebabrulle_tillagg" not in vesuvio["groups"]
+            assert "lchf_kott" not in vesuvio["groups"]
+            assert body["modifiers"]["modifiers"]["pizza_storlek"]["label"] == "Storlek"
             assert menu.headers.get("access-control-allow-origin") == "*"
 
     _run(check())
