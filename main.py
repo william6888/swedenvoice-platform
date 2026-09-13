@@ -16,6 +16,7 @@ import order_service
 import ops_agent
 import ops_worker
 import confirmation
+import app_channel
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
@@ -23,7 +24,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from env_loader import load_env_file
@@ -142,7 +143,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-11-vapi-reliability-2"
+BUILD_TAG = "2026-09-13-kundapp-v1"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -164,8 +165,16 @@ app.add_middleware(
         "X-Admin-Key",
         "X-Dashboard-Key",
         "X-Webhook-Secret",
+        "X-App-Session",
     ],
 )
+
+_APP_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-App-Session",
+    "Access-Control-Max-Age": "86400",
+}
 
 _VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
 _DASHBOARD_COOKIE_NAME = "gisle_dashboard_session"
@@ -276,6 +285,19 @@ async def log_post_path(request: Request, call_next):
         print(f">>> INCOMING POST {request.url.path} <<<")
     return await call_next(request)
 
+
+@app.middleware("http")
+async def app_public_cors(request: Request, call_next):
+    """Kundappen på lovable.app behöver öppen CORS. Inga cookies, därför *."""
+    if not request.url.path.startswith("/app"):
+        return await call_next(request)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_APP_CORS_HEADERS)
+    response = await call_next(request)
+    for key, value in _APP_CORS_HEADERS.items():
+        response.headers[key] = value
+    return response
+
 _OPS_BACKGROUND_TASK = None
 
 
@@ -374,6 +396,31 @@ class PlaceOrderRequest(BaseModel):
     items: List[OrderItem] = Field(min_length=1, max_length=order_integrity.MAX_ITEMS_PER_ORDER)
     special_requests: Optional[str] = None
 
+
+class AppOtpRequest(BaseModel):
+    phone: str
+
+
+class AppOtpVerify(BaseModel):
+    phone: str
+    code: str
+
+
+class AppOrderItemIn(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+    quantity: int = Field(default=1, ge=1, le=order_integrity.MAX_QUANTITY_PER_ITEM)
+    notes: Optional[str] = None
+    special_requests: Optional[str] = None
+
+
+class AppOrderIn(BaseModel):
+    items: List[AppOrderItemIn] = Field(min_length=1, max_length=order_integrity.MAX_ITEMS_PER_ORDER)
+    service_mode: str = "takeaway"
+    customer_name: str = Field(min_length=2, max_length=60)
+    notes: Optional[str] = None
+    client_request_id: Optional[str] = None
+
 class Order(BaseModel):
     order_id: str
     items: List[OrderItem]
@@ -459,43 +506,32 @@ def _parse_items_from_params(params: dict, rest_id: Optional[str] = None) -> lis
 
 def _order_special_requests_from_params(params: dict) -> str:
     """
-    Normalisera server-trustad serveringsform från nya Vapi-schemat.
+    Kundens önskemål/allergier på ordernivå.
 
-    `special_requests` behålls för äldre assistenter, men nya assistenter skickar
-    varje ändring på rätt orderrad och bara `service_mode` på ordernivå.
+    `service_mode` är separat (telefonorder är ta med) och ska inte hamna i
+    önskemålstexten som köket läser.
     """
     legacy = str(
         params.get("special_requests")
         or params.get("specialRequests")
         or ""
     ).strip()
-    raw_mode = str(
-        params.get("service_mode")
-        or params.get("serviceMode")
-        or ""
-    ).strip()
-    mode_key = (
-        raw_mode.casefold()
-        .replace("_", " ")
-        .replace("-", " ")
-    )
-    mode_key = re.sub(r"\s+", " ", mode_key).strip()
-    if mode_key in {"ta med", "takeaway", "take away"}:
-        mode = "Ta med"
-    elif mode_key in {"äta här", "ata har", "äta har", "ata här"}:
-        mode = "Äta här"
-    else:
-        mode = ""
+    return _strip_service_mode_from_notes(legacy)
 
-    if not mode:
-        return legacy
-    if not legacy:
-        return mode
 
-    legacy_key = legacy.casefold().replace("_", " ")
-    if legacy_key.startswith(mode.casefold()):
-        return legacy
-    return f"{mode}. {legacy}"
+def _strip_service_mode_from_notes(text: str) -> str:
+    """Ta bort äta-här/ta-med från önskemål så bara riktiga noter/allergier syns."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    normalized = raw.casefold().replace("_", " ")
+    for prefix in ("ta med", "äta här", "ata har"):
+        if normalized == prefix:
+            return ""
+        if normalized.startswith(prefix):
+            rest = raw[len(prefix):].lstrip(" .;,:")
+            return _strip_service_mode_from_notes(rest)
+    return raw
 
 
 def load_menu(rest_id: Optional[str] = None) -> dict:
@@ -611,6 +647,47 @@ def find_menu_item(item_id: int, rest_id: Optional[str] = None):
     return None
 
 
+_PEPSI_MAX_MARKERS = ("pepsi max",)
+_OTHER_SODA_MARKERS = ("cola", "coca", "fanta", "sprite")
+_DRINK_15 = {
+    "1.5 liter",
+    "1,5 liter",
+    "1.5l",
+    "1.5 l",
+    "1,5l",
+    "en och en halv liter",
+}
+_DRINK_2L = {
+    "2 liter",
+    "2l",
+    "2 l",
+    "2liter",
+    "två liter",
+}
+
+
+def _normalize_drink_items(items_data: list) -> list:
+    """Stor cola är 2 liter. Bara stor pepsi max är 1.5 liter."""
+    out = []
+    for raw in items_data or []:
+        if not isinstance(raw, dict):
+            out.append(raw)
+            continue
+        item = dict(raw)
+        name = str(item.get("name") or "").strip()
+        notes = str(item.get("special_requests") or item.get("notes") or "").strip()
+        blob = f"{name} {notes}".casefold().replace(",", ".")
+        pepsi_max = any(marker in blob for marker in _PEPSI_MAX_MARKERS)
+        other_soda = (not pepsi_max) and any(marker in blob for marker in _OTHER_SODA_MARKERS)
+        name_key = name.casefold().replace(",", ".")
+        if pepsi_max and name_key in _DRINK_2L:
+            item["name"] = "1.5 liter"
+        elif other_soda and name_key in _DRINK_15:
+            item["name"] = "2 liter"
+        out.append(item)
+    return out
+
+
 def _resolve_items_with_menu_match(
     items_data: list,
     rest_id: str,
@@ -639,6 +716,7 @@ def _resolve_items_with_menu_match(
                 [],
             ),
         )
+    items_data = _normalize_drink_items(items_data)
     ok, resolved, unmatched = menu_match.resolve_order_items(items_data, index, rest_id)
     if not ok:
         return (
@@ -688,7 +766,7 @@ def print_kitchen_ticket(order: Order):
         print(f"  [{item.quantity}x] {item.name}")
     print("-"*60)
     if order.special_requests:
-        print(f"⚠️  SPECIAL: {order.special_requests}")
+        print(f"⚠️  Önskemål/allergier: {order.special_requests}")
         print("-"*60)
     print("="*60)
     print(f"STATUS: {order.status.upper()}")
@@ -818,6 +896,7 @@ def _build_order_row_for_supabase(
     payload_hash: Optional[str],
     needs_review: bool,
     confirmation_token: Optional[str],
+    source: str = "vapi",
 ) -> Dict[str, Any]:
     """Bygg full Supabase-rad inklusive Fas 1 tekniska fält. Schema-fallback hanteras i order_service."""
 
@@ -853,7 +932,7 @@ def _build_order_row_for_supabase(
         "validation_version": order_integrity.VALIDATION_VERSION,
         "needs_human_review": bool(needs_review),
         "confirmation_token": confirmation_token,
-        "source": "vapi",
+        "source": source if source in ("vapi", "app") else "vapi",
     }
     # Env-UUID-fallback endast för default-tenanten (annars fel kök vid DB-glapp).
     uuid_val = restaurant_uuid or (RESTAURANT_UUID if (restaurant_id or "") == DEFAULT_DASHBOARD_REST_ID else None)
@@ -971,6 +1050,7 @@ def _commit_order_supabase_first(
     correlation_id: Optional[str],
     draft_token: Optional[str] = None,
     require_draft_token: bool = False,
+    source: str = "vapi",
 ) -> Dict[str, Any]:
     """
     Centralt commit-flöde för en beställning. Returnerar dict:
@@ -1346,6 +1426,7 @@ def _commit_order_supabase_first(
             payload_hash=payload_hash,
             needs_review=needs_review,
             confirmation_token=None,
+            source=source,
         )
         db_order_id, db_error = order_service.insert_order_row(_supabase_client, row)
         if db_error:
@@ -2587,6 +2668,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "menu": "/menu",
+            "app_menu": "/app/menu",
             "orders": "/orders",
             "place_order": "/place_order",
             "dashboard": "/dashboard",
@@ -2602,6 +2684,211 @@ async def get_menu(rest_id: Optional[str] = None):
     if not menu_match.menu_has_items(menu):
         raise HTTPException(status_code=503, detail="Tenant menu is not configured")
     return JSONResponse(content=menu)
+
+
+def _app_client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else ""
+
+
+def _app_closed_payload() -> dict:
+    return {
+        "ok": False,
+        "error": "closed",
+        "message": "Vi har stängt just nu.",
+        "hours": app_channel.opening_hours_label(),
+    }
+
+
+def _app_require_session_phone(request: Request) -> str:
+    phone = app_channel.session_from_headers(
+        request.headers.get("authorization") or "",
+        request.headers.get("x-app-session") or "",
+    )
+    if not phone:
+        raise HTTPException(status_code=401, detail="Logga in med SMS-kod först.")
+    return phone
+
+
+def _app_json_error(status: int, message: str, extra: Optional[dict] = None) -> JSONResponse:
+    payload = {"ok": False, "error": message}
+    if extra:
+        payload.update(extra)
+    return JSONResponse(status_code=status, content=payload)
+
+
+@app.get("/app/info")
+async def app_info(rest_id: Optional[str] = None):
+    """Publik restauranginfo till kundappen. Inga hemligheter."""
+    effective_rest_id, _ = _require_known_tenant(rest_id)
+    return {
+        "ok": True,
+        "restaurant_id": effective_rest_id,
+        "name": "Gislegrillen",
+        "address": "Gräfthultsvägen 3",
+        "hours": app_channel.opening_hours_label(),
+        "open": app_channel.restaurant_is_open(),
+        "pay_at_pickup": True,
+        "eta_minutes": "10–15",
+    }
+
+
+@app.get("/app/menu")
+async def app_menu(rest_id: Optional[str] = None):
+    """Publik meny utan alias-kartor. Priser kommer bara om servern har dem."""
+    effective_rest_id, _ = _require_known_tenant(rest_id)
+    menu = get_menu_cached(effective_rest_id)
+    if not menu_match.menu_has_items(menu):
+        raise HTTPException(status_code=503, detail="Menyn kunde inte laddas just nu.")
+    return {
+        "ok": True,
+        "restaurant_id": effective_rest_id,
+        "categories": app_channel.public_menu(menu),
+        "category_labels": app_channel.CATEGORY_LABELS,
+        "modifiers": app_channel.public_modifiers(menu),
+        "open": app_channel.restaurant_is_open(),
+        "hours": app_channel.opening_hours_label(),
+        "pay_at_pickup": True,
+    }
+
+
+@app.post("/app/otp/request")
+async def app_otp_request(payload: AppOtpRequest, request: Request):
+    if not app_channel.restaurant_is_open():
+        return JSONResponse(status_code=403, content=_app_closed_payload())
+    phone = app_channel.swedish_mobile(payload.phone)
+    if not phone:
+        return _app_json_error(400, "Ange ett svenskt mobilnummer.")
+    ok, err, code = app_channel.request_otp(phone, _app_client_ip(request))
+    if not ok or not code:
+        return _app_json_error(429, err or "För många försök. Vänta en stund.")
+    sent = _sms_sender_for_worker(phone, app_channel.otp_sms_text(code))
+    if not sent.get("ok"):
+        print(f"app_otp: SMS misslyckades phone={phone} err={sent.get('error')}")
+        return _app_json_error(503, "Kunde inte skicka SMS just nu. Försök igen.")
+    return {"ok": True, "phone": phone}
+
+
+@app.post("/app/otp/verify")
+async def app_otp_verify(payload: AppOtpVerify):
+    phone = app_channel.swedish_mobile(payload.phone)
+    if not phone:
+        return _app_json_error(400, "Ange ett svenskt mobilnummer.")
+    ok, err = app_channel.verify_otp(phone, payload.code)
+    if not ok:
+        return _app_json_error(401, err or "Fel kod.")
+    return {"ok": True, "session": app_channel.issue_session(phone), "phone": phone}
+
+
+@app.post("/app/orders")
+async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Optional[str] = None):
+    """Kundorder via appen. Validerar meny + SMS-session. Skriver source=app."""
+    if not app_channel.restaurant_is_open():
+        return JSONResponse(status_code=403, content=_app_closed_payload())
+    phone = _app_require_session_phone(request)
+    if not app_channel.can_place_order(phone):
+        return _app_json_error(429, "Du har redan lagt flera ordrar nyligen. Ring oss om du behöver ändra.")
+
+    effective_rest_id, restaurant_uuid = _require_known_tenant(rest_id)
+    paused, _paused_reason = ops_agent.is_intake_paused(_supabase_client, restaurant_uuid)
+    if paused:
+        return _app_json_error(503, "Beställningar kan inte tas emot just nu. Försök igen lite senare.")
+
+    items_data = []
+    for raw in payload.items:
+        name = (raw.name or "").strip()
+        if not name and raw.id is None:
+            return _app_json_error(400, "Varje rad måste ha namn eller id.")
+        notes = (raw.notes or raw.special_requests or "").strip() or None
+        row: Dict[str, Any] = {"quantity": int(raw.quantity)}
+        if raw.id is not None:
+            row["id"] = raw.id
+        if name:
+            row["name"] = name
+        if notes:
+            row["special_requests"] = notes
+        items_data.append(row)
+
+    matched, resolved_items, fail_json = _resolve_items_with_menu_match(items_data, effective_rest_id)
+    if not matched:
+        try:
+            fail = json.loads(fail_json) if fail_json else {}
+        except (TypeError, json.JSONDecodeError):
+            fail = {}
+        return _app_json_error(
+            422,
+            "En eller flera rätter finns inte på menyn.",
+            {"unmatched": fail.get("unmatchedItems") or []},
+        )
+
+    try:
+        items = [
+            OrderItem(
+                id=it["id"],
+                name=it["name"],
+                quantity=it.get("quantity") or 1,
+                price=it.get("price"),
+                special_requests=it.get("special_requests"),
+            )
+            for it in resolved_items
+        ]
+    except Exception:
+        return _app_json_error(400, "Beställningen kunde inte läsas.")
+
+    customer_name = payload.customer_name.strip()
+    special_requests = app_channel.compose_special_requests(payload.service_mode, payload.notes)
+    request_id = app_channel.sanitize_client_request_id(payload.client_request_id) or hashlib.sha256(
+        f"{phone}|{time.time_ns()}".encode("utf-8")
+    ).hexdigest()[:16]
+    call_id = f"app-{request_id}"
+
+    commit = _commit_order_supabase_first(
+        items=items,
+        raw_items=resolved_items,
+        rest_id=effective_rest_id,
+        restaurant_id=effective_rest_id,
+        restaurant_uuid=restaurant_uuid,
+        customer_name=customer_name,
+        customer_phone=phone,
+        raw_transcript="kundapp",
+        special_requests=special_requests,
+        vapi_call_id=call_id,
+        vapi_tool_call_id="app-order",
+        correlation_id=call_id,
+        draft_token=None,
+        require_draft_token=False,
+        source="app",
+    )
+    if not commit.get("success"):
+        return _app_json_error(
+            409 if commit.get("error_code") == "ORDER_ALREADY_COMMITTED_DIFFERENT_PAYLOAD" else 503,
+            commit.get("error_message") or "Beställningen kunde inte sparas just nu.",
+            {"error_code": commit.get("error_code")},
+        )
+
+    if not commit.get("idempotent_replay"):
+        app_channel.record_order_phone(phone)
+        sms_order = Order(
+            order_id=commit["order_id"],
+            items=items,
+            special_requests=special_requests,
+            total_price=commit.get("total_price") or 0.0,
+            status="needs_review" if commit.get("needs_human_review") else "pending",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            needs_human_review=bool(commit.get("needs_human_review")),
+        )
+        if not commit.get("needs_human_review"):
+            send_customer_sms_now(sms_order, phone, effective_rest_id, commit.get("db_order_id"))
+
+    return {
+        "ok": True,
+        "order_id": commit["order_id"],
+        "eta": "10–15 minuter",
+        "pay_at_pickup": True,
+        "replay": bool(commit.get("idempotent_replay")),
+    }
 
 
 @app.post("/match_menu")
@@ -3328,7 +3615,12 @@ def _process_place_order(
         ))
         if item.special_requests and item.special_requests.strip():
             per_item_specs.append("%dx %s: %s" % (item.quantity, name, item.special_requests.strip()))
-    combined_special = "; ".join(per_item_specs) if per_item_specs else special_requests
+    item_notes = "; ".join(per_item_specs)
+    top = (special_requests or "").strip()
+    if top and item_notes:
+        combined_special = "%s. %s" % (top, item_notes)
+    else:
+        combined_special = top or item_notes or None
     total_price = calculate_total_price(enriched_items, rest_id)
     order = Order(
         order_id=generate_order_id(),

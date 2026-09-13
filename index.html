@@ -354,6 +354,26 @@
                 .replace(/'/g, '&#39;');
         }
 
+        function customerWishText(value) {
+            let text = String(value || '').trim();
+            if (!text) return '';
+            const prefixes = ['ta med', 'äta här', 'ata har'];
+            let changed = true;
+            while (changed && text) {
+                const lower = text.toLowerCase().replace(/_/g, ' ');
+                changed = false;
+                for (const prefix of prefixes) {
+                    if (lower === prefix) return '';
+                    if (lower.startsWith(prefix)) {
+                        text = text.slice(prefix.length).replace(/^[\s.;,:]+/, '');
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            return text;
+        }
+
         // Display orders
         function displayOrders(orders) {
             const container = document.getElementById('orders-container');
@@ -394,10 +414,11 @@
                 'failed': 'Fel'
             }[order.status] || escapeHtml(order.status);
 
-            const specialRequestsHtml = order.special_requests ? `
+            const notes = customerWishText(order.special_requests);
+            const specialRequestsHtml = notes ? `
                 <div class="special-requests">
                     <i class="bi bi-exclamation-circle-fill"></i>
-                    <strong>Special:</strong> ${escapeHtml(order.special_requests)}
+                    <strong>Önskemål/allergier:</strong> ${escapeHtml(notes)}
                 </div>
             ` : '';
 
