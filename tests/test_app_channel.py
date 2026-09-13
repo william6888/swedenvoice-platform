@@ -10,6 +10,7 @@ STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
 def setup_function():
     C.reset_stores()
+    C.configure_persistence(None)
 
 
 def test_swedish_mobile_accepts_local_and_e164():
@@ -63,7 +64,8 @@ def test_otp_rate_limit_per_phone():
 def test_session_roundtrip():
     token = C.issue_session("+46701234567", now=1_000_000)
     assert C.verify_session(token, now=1_000_010) == "+46701234567"
-    assert C.verify_session(token, now=1_000_000 + 21 * 60) is None
+    assert C.verify_session(token, now=1_000_000 + 24 * 60 * 60) == "+46701234567"
+    assert C.verify_session(token, now=1_000_000 + 7 * 24 * 60 * 60 + 60) is None
     assert C.verify_session("tampered|1|nope") is None
 
 
@@ -82,7 +84,6 @@ def test_compose_special_requests_and_menu_strip():
     assert public["pizzas"][0]["groups"] == [
         "pizza_storlek",
         "pizza_botten",
-        "kebabtyp",
         "pizza_tillagg",
         "barnportion",
     ]
@@ -104,10 +105,10 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert vesuvio["groups"] == [
         "pizza_storlek",
         "pizza_botten",
-        "kebabtyp",
         "pizza_tillagg",
         "barnportion",
     ]
+    assert "kebabtyp" not in vesuvio["groups"]
     assert "kebabrulle_tillagg" not in vesuvio["groups"]
     assert "lchf_kott" not in vesuvio["groups"]
     assert "saser" not in vesuvio["groups"]
@@ -118,7 +119,7 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert "kebabrulle_tillagg" not in kebabpizza["groups"]
 
     alex = next(d for d in public["pizzas"] if "Alex" in d["name"] or "ALEX" in d["name"])
-    assert "kebabtyp" in alex["groups"]
+    assert "kebabtyp" not in alex["groups"]
     assert "kebabrulle_tillagg" not in alex["groups"]
 
     rulle = next(d for d in public["kebabs"] if d["name"] == "Kebabrulle")
@@ -147,15 +148,16 @@ def test_public_menu_scopes_modifiers_per_dish():
     assert extra_sas["price"] == 10
     assert extra_sas["price_large"] == 18
     assert "price_family" not in extra_sas
-    mild_sas = next(d for d in public["tillbehor"] if d["id"] == 100)
-    assert mild_sas["groups"] == []
+    assert all(d["id"] != 100 for d in public["tillbehor"])
+    assert all(d["id"] != 62 for d in public.get("sallader", []))
+    assert all(d["id"] != 106 for d in public.get("drycker", []))
 
     mods = C.public_modifiers(menu)
     assert mods["modifiers"]["pizza_storlek"]["label"] == "Storlek"
     assert mods["modifiers"]["pizza_storlek"]["default"] == "Standard"
     assert mods["modifiers"]["pizza_storlek"]["options"][0]["label"] == "Standard"
     assert mods["modifiers"]["pizza_storlek"]["required"] is True
-    assert mods["modifiers"]["pizza_botten"]["label"] == "Smak"
+    assert mods["modifiers"]["pizza_botten"]["label"] == "Botten"
     tillagg = [o["label"] for o in mods["modifiers"]["pizza_tillagg"]["options"]]
     rulle = [o["label"] for o in mods["modifiers"]["kebabrulle_tillagg"]["options"]]
     assert mods["modifiers"]["pizza_tillagg"]["label"] == "Extra topping"
@@ -183,7 +185,7 @@ def test_public_menu_scopes_modifiers_per_dish():
         "Laktosfri",
     ]
     assert mods["modifiers"]["sas_tillval"]["required"] is False
-    assert "kebabtyp" in mods["category_groups"]["pizzas"]
+    assert "kebabtyp" not in mods["category_groups"]["pizzas"]
     capricciosa = next(d for d in public["pizzas"] if d["name"] == "Capricciosa")
     assert capricciosa["price"] == 130
     assert capricciosa["price_family"] == 320
@@ -224,3 +226,43 @@ def test_server_prices_ignore_client_and_use_qopla():
     assert C.unit_price(101, "Stor, Mild", menu) == 18
     assert C.unit_price(101, "Stor, Vitlök", menu) == 18
     assert C.unit_price(101, "Mild", menu) == 10
+
+
+def test_required_groups_and_reviewer_otp(monkeypatch):
+    import json
+    from pathlib import Path
+
+    menu = json.loads(Path("menu.json").read_text(encoding="utf-8"))
+    published = C.public_modifiers(menu)["modifiers"]
+    extra = {"id": 101, "name": "Sås"}
+    assert "Smak" in C.missing_required_groups("tillbehor", extra, "Stor", published)
+    assert C.missing_required_groups("tillbehor", extra, "Stor, Mild", published) == []
+    vesuvio = {"id": 2, "name": "Vesuvio", "description": "Skinka"}
+    assert "Storlek" in C.missing_required_groups("pizzas", vesuvio, "", published)
+    assert C.missing_required_groups(
+        "pizzas", vesuvio, "Standard, Vanlig botten", published
+    ) == []
+
+    monkeypatch.setenv("APP_REVIEW_PHONE", "0709998877")
+    monkeypatch.setenv("APP_REVIEW_CODE", "654321")
+    phone = C.swedish_mobile("0709998877")
+    assert C.is_reviewer_phone(phone)
+    ok, _, code = C.request_otp(phone, "8.8.8.8")
+    assert ok and code == "654321"
+    good, _ = C.verify_otp(phone, "654321")
+    assert good is True
+
+
+def test_otp_survives_memory_clear():
+    from tests.fake_supabase import FakeSupabase
+
+    db = FakeSupabase()
+    C.configure_persistence(db)
+    try:
+        ok, _, code = C.request_otp("+46701234567", "3.3.3.3")
+        assert ok and code
+        C._OTP_STORE.clear()
+        good, _ = C.verify_otp("+46701234567", code)
+        assert good is True
+    finally:
+        C.configure_persistence(None)

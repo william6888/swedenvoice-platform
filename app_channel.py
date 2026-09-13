@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -28,7 +28,7 @@ _DEFAULT_HOURS = {
 }
 
 _OTP_TTL_SEC = 5 * 60
-_SESSION_TTL_SEC = 20 * 60
+_SESSION_TTL_SEC = 7 * 24 * 60 * 60
 _OTP_MAX_ATTEMPTS = 5
 _OTP_PER_PHONE = 3
 _OTP_PER_IP = 8
@@ -38,6 +38,7 @@ _ORDERS_WINDOW_SEC = 60 * 60
 
 _OTP_STORE: Dict[str, Dict[str, Any]] = {}
 _RATE: Dict[str, List[float]] = {}
+_persist_client: Any = None
 
 
 def _signing_secret() -> bytes:
@@ -97,7 +98,7 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
         "default": "Standard",
     },
     "pizza_botten": {
-        "label": "Smak",
+        "label": "Botten",
         "selection": "single",
         "required": True,
         "default": "Vanlig botten",
@@ -160,7 +161,7 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
 
 # Fallback om en äldre klient inte läser dish.groups.
 CATEGORY_GROUPS: Dict[str, List[str]] = {
-    "pizzas": ["pizza_storlek", "pizza_botten", "kebabtyp", "pizza_tillagg", "barnportion"],
+    "pizzas": ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"],
     "kebabs": ["kebabtyp", "saser", "barnportion"],
     "kyckling": ["saser", "barnportion"],
     "sallader": ["sas_tillval"],
@@ -187,10 +188,38 @@ def _is_rulle(item: dict) -> bool:
     return "rulle" in str(item.get("name") or "").casefold()
 
 
+def _pizza_offers_kebabtyp(item: dict) -> bool:
+    """Kebabtyp bara när rätten faktiskt har kebabkött, inte bara kebabsås."""
+    blob = f"{item.get('name') or ''} {item.get('description') or ''}".casefold()
+    return "kebabkött" in blob or "kebabkott" in blob
+
+
+def configure_persistence(client: Any) -> None:
+    """Supabase-klient så OTP överlever deploy. None = bara minne (tester)."""
+    global _persist_client
+    _persist_client = client
+
+
+def reviewer_phone() -> Optional[str]:
+    return swedish_mobile(os.getenv("APP_REVIEW_PHONE"))
+
+
+def reviewer_code() -> str:
+    return (os.getenv("APP_REVIEW_CODE") or "").strip()
+
+
+def is_reviewer_phone(phone: str) -> bool:
+    target = reviewer_phone()
+    return bool(target and phone == target and reviewer_code())
+
+
 def dish_modifier_groups(category: str, item: dict) -> List[str]:
     """Tillvalsgrupper som hör till just den här rätten."""
     if category == "pizzas":
-        return ["pizza_storlek", "pizza_botten", "kebabtyp", "pizza_tillagg", "barnportion"]
+        groups = ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"]
+        if _pizza_offers_kebabtyp(item):
+            groups.insert(2, "kebabtyp")
+        return groups
     if category == "kebabs":
         groups = ["kebabtyp", "saser", "barnportion"]
         if _is_rulle(item):
@@ -227,12 +256,13 @@ def public_menu(menu: dict) -> dict:
                 "groups": dish_modifier_groups(key, it),
             }
             priced = app_prices.dish_prices(it.get("id"), menu)
-            if priced:
-                row["price"] = priced["price"]
-                if priced.get("family") is not None:
-                    row["price_family"] = priced["family"]
-                if priced.get("large") is not None:
-                    row["price_large"] = priced["large"]
+            if not priced:
+                continue
+            row["price"] = priced["price"]
+            if priced.get("family") is not None:
+                row["price_family"] = priced["family"]
+            if priced.get("large") is not None:
+                row["price_large"] = priced["large"]
             rows.append(row)
         if rows:
             out[key] = rows
@@ -405,6 +435,47 @@ def unit_price(item_id: Any, notes: Optional[str], menu: Optional[dict] = None) 
     return app_prices.unit_price(item_id, app_prices.labels_from_notes(notes), menu)
 
 
+def category_for_item(menu: dict, item_id: Any, name: str = "") -> Optional[str]:
+    wanted = _as_int_id(item_id)
+    folded = (name or "").strip().casefold()
+    for key, items in (menu or {}).items():
+        if key.startswith("_") or not isinstance(items, list):
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if wanted is not None and _as_int_id(it.get("id")) == wanted:
+                return key
+            if folded and str(it.get("name") or "").strip().casefold() == folded:
+                return key
+    return None
+
+
+def missing_required_groups(
+    category: str,
+    item: dict,
+    notes: Optional[str],
+    published: Optional[dict] = None,
+) -> List[str]:
+    """Etiketter för required+single som saknas i notes. Tom lista = ok."""
+    chosen = {app_prices._fold(label) for label in app_prices.labels_from_notes(notes)}
+    groups = published or {}
+    missing: List[str] = []
+    for key in dish_modifier_groups(category, item):
+        spec = groups.get(key) if isinstance(groups.get(key), dict) else None
+        meta = GROUP_META.get(key) or {}
+        required = bool((spec or {}).get("required") if spec is not None else meta.get("required"))
+        selection = (spec or {}).get("selection") or meta.get("selection") or "multi"
+        if not required or selection != "single":
+            continue
+        options = []
+        if spec:
+            options = [str(o.get("label") or "") for o in (spec.get("options") or []) if isinstance(o, dict)]
+        if not any(app_prices._fold(option) in chosen for option in options if option):
+            missing.append(str((spec or {}).get("label") or meta.get("label") or key))
+    return missing
+
+
 def compose_special_requests(service_mode: str, notes: Optional[str]) -> str:
     mode = (service_mode or "").strip().casefold()
     if mode in {"eat_in", "ata_har", "äta här", "dine_in", "dine-in"}:
@@ -426,6 +497,78 @@ def hash_otp(code: str) -> str:
     return hmac.new(_signing_secret(), str(code).strip().encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _otp_from_db(phone: str) -> Optional[Dict[str, Any]]:
+    if _persist_client is None:
+        return None
+    try:
+        resp = _persist_client.table("app_otp").select("*").eq("phone", phone).limit(1).execute()
+        rows = resp.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        expires_raw = row.get("expires_at")
+        if isinstance(expires_raw, (int, float)):
+            expires = float(expires_raw)
+        else:
+            parsed = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+            expires = parsed.timestamp()
+        return {
+            "hash": row.get("code_hash") or "",
+            "expires": expires,
+            "attempts": int(row.get("attempts") or 0),
+        }
+    except Exception as exc:
+        print(f"app_otp load skip: {exc}")
+        return None
+
+
+def _otp_to_db(phone: str, row: Dict[str, Any]) -> None:
+    if _persist_client is None:
+        return
+    try:
+        expires_at = datetime.fromtimestamp(float(row["expires"]), tz=timezone.utc).isoformat()
+        _persist_client.table("app_otp").upsert(
+            {
+                "phone": phone,
+                "code_hash": row["hash"],
+                "expires_at": expires_at,
+                "attempts": int(row.get("attempts") or 0),
+            },
+            on_conflict="phone",
+        ).execute()
+    except Exception as exc:
+        print(f"app_otp save skip: {exc}")
+
+
+def _otp_delete_db(phone: str) -> None:
+    if _persist_client is None:
+        return
+    try:
+        _persist_client.table("app_otp").delete().eq("phone", phone).execute()
+    except Exception as exc:
+        print(f"app_otp delete skip: {exc}")
+
+
+def _otp_get(phone: str) -> Optional[Dict[str, Any]]:
+    row = _OTP_STORE.get(phone)
+    if row:
+        return row
+    loaded = _otp_from_db(phone)
+    if loaded:
+        _OTP_STORE[phone] = loaded
+    return loaded
+
+
+def _otp_set(phone: str, row: Dict[str, Any]) -> None:
+    _OTP_STORE[phone] = row
+    _otp_to_db(phone, row)
+
+
+def _otp_pop(phone: str) -> None:
+    _OTP_STORE.pop(phone, None)
+    _otp_delete_db(phone)
+
+
 def session_from_headers(authorization: str, x_app_session: str, now: Optional[float] = None) -> Optional[str]:
     token = ""
     auth = (authorization or "").strip()
@@ -442,30 +585,42 @@ def request_otp(phone: str, ip: str, now: Optional[float] = None) -> Tuple[bool,
         return (False, "För många koder till det numret. Vänta en stund.", None)
     if ip and not rate_allow(f"otp-ip:{ip}", _OTP_PER_IP, _OTP_WINDOW_SEC, n):
         return (False, "För många försök. Vänta en stund.", None)
-    code = f"{secrets.randbelow(1_000_000):06d}"
-    _OTP_STORE[phone] = {
-        "hash": hash_otp(code),
-        "expires": n + _OTP_TTL_SEC,
-        "attempts": 0,
-    }
+    if is_reviewer_phone(phone):
+        code = reviewer_code()
+    else:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+    _otp_set(
+        phone,
+        {
+            "hash": hash_otp(code),
+            "expires": n + _OTP_TTL_SEC,
+            "attempts": 0,
+        },
+    )
     return (True, "", code)
 
 
 def verify_otp(phone: str, code: str, now: Optional[float] = None) -> Tuple[bool, str]:
     n = float(now if now is not None else time.time())
-    row = _OTP_STORE.get(phone)
+    given = str(code).strip()
+    expected_review = reviewer_code()
+    if is_reviewer_phone(phone) and len(given) == len(expected_review) and hmac.compare_digest(given, expected_review):
+        _otp_pop(phone)
+        return (True, "")
+    row = _otp_get(phone)
     if not row:
         return (False, "Ingen kod skickad till det numret.")
     if n > float(row["expires"]):
-        _OTP_STORE.pop(phone, None)
+        _otp_pop(phone)
         return (False, "Koden har gått ut. Be om en ny.")
     row["attempts"] = int(row.get("attempts") or 0) + 1
+    _otp_set(phone, row)
     if row["attempts"] > _OTP_MAX_ATTEMPTS:
-        _OTP_STORE.pop(phone, None)
+        _otp_pop(phone)
         return (False, "För många felaktiga koder. Be om en ny.")
-    if not hmac.compare_digest(row["hash"], hash_otp(str(code).strip())):
+    if not hmac.compare_digest(row["hash"], hash_otp(given)):
         return (False, "Fel kod.")
-    _OTP_STORE.pop(phone, None)
+    _otp_pop(phone)
     return (True, "")
 
 
