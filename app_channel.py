@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import app_prices
+
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
 # Mån=0 … Sön=6. (öppnar, stänger) i timmar, stängning exklusiv.
@@ -43,8 +45,12 @@ def _signing_secret() -> bytes:
         os.getenv("DRAFT_SIGNING_SECRET")
         or os.getenv("ENCRYPTION_SECRET")
         or os.getenv("ADMIN_SECRET")
-        or "gislegrillen-app-otp-dev-rotate-me"
+        or ""
     )
+    if not secret:
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            raise RuntimeError("DRAFT_SIGNING_SECRET saknas – app-sessioner kan inte signeras.")
+        secret = "gislegrillen-app-otp-dev-rotate-me"
     return secret.encode("utf-8")
 
 
@@ -188,7 +194,7 @@ def dish_modifier_groups(category: str, item: dict) -> List[str]:
 
 
 def public_menu(menu: dict) -> dict:
-    """Meny till appen: id, namn, beskrivning och tillvalsgrupper för just den rätten."""
+    """Meny till appen: id, namn, beskrivning, tillval och Qopla-priser om vi har dem."""
     out: Dict[str, list] = {}
     for key, items in (menu or {}).items():
         if key.startswith("_") or not isinstance(items, list):
@@ -197,12 +203,18 @@ def public_menu(menu: dict) -> dict:
         for it in items:
             if not isinstance(it, dict) or not it.get("name"):
                 continue
-            rows.append({
+            row: Dict[str, Any] = {
                 "id": it.get("id"),
-                "name": it["name"],
+                "name": app_prices.display_name(it.get("id"), it["name"]),
                 "description": it.get("description") or "",
                 "groups": dish_modifier_groups(key, it),
-            })
+            }
+            priced = app_prices.dish_prices(it.get("id"), menu)
+            if priced:
+                row["price"] = priced["price"]
+                if priced.get("family") is not None:
+                    row["price_family"] = priced["family"]
+            rows.append(row)
         if rows:
             out[key] = rows
     return out
@@ -239,16 +251,16 @@ def can_place_order(phone: str, now: Optional[float] = None) -> bool:
 
 
 CATEGORY_LABELS = {
-    "pizzas": "Pizzor",
+    "pizzas": "Pizza",
     "kebabs": "Kebab",
     "kyckling": "Kyckling",
-    "sallader": "Sallad",
+    "sallader": "Sallader",
     "ovrigt": "Övrigt",
     "lchf": "LCHF",
     "schnitzel": "Schnitzel",
     "hamburgare": "Hamburgare",
     "korv": "Korv",
-    "tillbehor": "Tillbehör",
+    "tillbehor": "Tillval",
     "drycker": "Dryck",
 }
 
@@ -269,11 +281,30 @@ def _option_list(vals: Any) -> List[str]:
         else:
             label = str(v).strip()
         if label:
-            out.append(label)
+            out.append(app_prices.option_display_label(label))
     return out
 
 
-def _publish_group(key: str, options: List[str], extra: Optional[dict] = None) -> Dict[str, Any]:
+def _option_rows(labels: List[str], menu: Optional[dict] = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for label in labels:
+        shown = app_prices.option_display_label(label)
+        row: Dict[str, Any] = {"label": shown}
+        delta = app_prices.option_delta(shown, menu)
+        if delta == 0:
+            delta = app_prices.option_delta(label, menu)
+        if delta:
+            row["price"] = delta
+        rows.append(row)
+    return rows
+
+
+def _publish_group(
+    key: str,
+    options: List[str],
+    extra: Optional[dict] = None,
+    menu: Optional[dict] = None,
+) -> Dict[str, Any]:
     spec = dict(GROUP_META.get(key) or {})
     if extra:
         for field in ("label", "selection", "required", "default"):
@@ -287,15 +318,18 @@ def _publish_group(key: str, options: List[str], extra: Optional[dict] = None) -
     selection = spec.get("selection") or "multi"
     required = bool(spec.get("required"))
     default = spec.get("default")
-    if default and default not in options:
-        default = None
+    option_labels = [app_prices.option_display_label(o) for o in options]
+    if default:
+        default = app_prices.option_display_label(default)
+        if default not in option_labels:
+            default = None
     return {
         "label": label,
         "selection": selection,
         "multiple": selection == "multi",
         "required": required,
         "default": default,
-        "options": options,
+        "options": _option_rows(option_labels, menu),
     }
 
 
@@ -319,10 +353,10 @@ def public_modifiers(menu: dict) -> dict:
             options = ["Standard" if o.casefold() == "vanlig" else o for o in options]
         if not options:
             continue
-        groups[str(key)] = _publish_group(str(key), options, extra)
+        groups[str(key)] = _publish_group(str(key), options, extra, menu)
 
     if "barnportion" not in groups:
-        groups["barnportion"] = _publish_group("barnportion", [_BARNPORTION_LABEL])
+        groups["barnportion"] = _publish_group("barnportion", [_BARNPORTION_LABEL], menu=menu)
 
     return {
         "included": meta.get("included") or {},
@@ -331,6 +365,11 @@ def public_modifiers(menu: dict) -> dict:
         "gluten": meta.get("gluten") or {},
         "service_options": meta.get("service_options") or ["Ta med", "Äta här"],
     }
+
+
+def unit_price(item_id: Any, notes: Optional[str], menu: Optional[dict] = None) -> Optional[float]:
+    """Serverpris för en rad. Klientens ev. pris ignoreras."""
+    return app_prices.unit_price(item_id, app_prices.labels_from_notes(notes), menu)
 
 
 def compose_special_requests(service_mode: str, notes: Optional[str]) -> str:

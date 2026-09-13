@@ -47,10 +47,14 @@ def test_app_menu_is_public_and_has_cors(monkeypatch, tmp_path):
 
     async def check():
         async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
-            options = await client.options("/app/menu")
+            app_origin = {"Origin": "https://gislegrillen.lovable.app"}
+            options = await client.options("/app/menu", headers=app_origin)
             assert options.status_code == 204
-            assert options.headers.get("access-control-allow-origin") == "*"
-            menu = await client.get("/app/menu")
+            assert options.headers.get("access-control-allow-origin") == "https://gislegrillen.lovable.app"
+            blocked = await client.options("/app/menu", headers={"Origin": "https://evil.example"})
+            assert blocked.status_code == 204
+            assert blocked.headers.get("access-control-allow-origin") is None
+            menu = await client.get("/app/menu", headers=app_origin)
             assert menu.status_code == 200
             body = menu.json()
             assert body["ok"] is True
@@ -60,10 +64,18 @@ def test_app_menu_is_public_and_has_cors(monkeypatch, tmp_path):
             assert "kebabrulle_tillagg" not in vesuvio["groups"]
             assert "lchf_kott" not in vesuvio["groups"]
             assert "kebabtyp" in vesuvio["groups"]
+            assert vesuvio["price"] == 130
+            assert vesuvio["price_family"] == 320
+            assert body["category_labels"]["pizzas"] == "Pizza"
             assert body["modifiers"]["modifiers"]["pizza_storlek"]["label"] == "Storlek"
             assert body["modifiers"]["modifiers"]["pizza_storlek"]["default"] == "Standard"
             assert body["modifiers"]["modifiers"]["pizza_botten"]["label"] == "Smak"
-            assert menu.headers.get("access-control-allow-origin") == "*"
+            extra = next(
+                o for o in body["modifiers"]["modifiers"]["pizza_tillagg"]["options"]
+                if o["label"] == "Extra Ost"
+            )
+            assert extra["price"] == 15
+            assert menu.headers.get("access-control-allow-origin") == "https://gislegrillen.lovable.app"
 
     _run(check())
 
@@ -170,6 +182,49 @@ def test_orders_rejected_when_closed(monkeypatch, tmp_path):
             assert response.json()["error"] == "closed"
 
     _run(check())
+
+
+def test_app_order_uses_server_qopla_price(monkeypatch, tmp_path):
+    db = _patch_app(monkeypatch, tmp_path)
+    captured = {}
+
+    def capture_sms(to, body):
+        captured["body"] = body
+        return {"ok": True, "to": to}
+
+    monkeypatch.setattr(main, "_sms_sender_for_worker", capture_sms)
+
+    async def check():
+        async with httpx.AsyncClient(transport=_transport(), base_url="https://testserver") as client:
+            asked = await client.post("/app/otp/request", json={"phone": "+46701234567"})
+            assert asked.status_code == 200
+            code = re.search(r"(\d{6})", captured["body"]).group(1)
+            verify = await client.post(
+                "/app/otp/verify",
+                json={"phone": "+46701234567", "code": code},
+            )
+            session = verify.json()["session"]
+            response = await client.post(
+                "/app/orders",
+                headers={"X-App-Session": session},
+                json={
+                    "customer_name": "Anna",
+                    "service_mode": "takeaway",
+                    "client_request_id": "priced-cap-1",
+                    "items": [{
+                        "id": 1,
+                        "name": "Capricciosa",
+                        "quantity": 1,
+                        "notes": "Familj, Glutenfri botten",
+                    }],
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["total_price"] == 350
+
+    _run(check())
+    rows = db.get_orders()
+    assert rows[0]["items"][0]["price"] == 350
 
 
 def test_landline_cannot_request_otp(monkeypatch, tmp_path):

@@ -143,7 +143,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-13-kundapp-v3"
+BUILD_TAG = "2026-09-13-kundapp-v4"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -169,12 +169,39 @@ app.add_middleware(
     ],
 )
 
-_APP_CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-App-Session",
-    "Access-Control-Max-Age": "86400",
-}
+_APP_CORS_METHODS = "GET, POST, OPTIONS"
+_APP_CORS_HEADERS_LIST = "Authorization, Content-Type, X-App-Session"
+_APP_CORS_EXACT_ORIGINS = frozenset({
+    "https://gislegrillen.lovable.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+})
+
+
+def _app_allow_origin(origin: str) -> Optional[str]:
+    """Bara kundappens egna sidor, inte godtycklig främmande sajt."""
+    value = (origin or "").strip()
+    if not value:
+        return None
+    if value in _APP_CORS_EXACT_ORIGINS:
+        return value
+    if value.startswith("https://") and value.endswith(".lovable.app"):
+        return value
+    return None
+
+
+def _app_cors_headers(origin: Optional[str]) -> Dict[str, str]:
+    headers = {
+        "Access-Control-Allow-Methods": _APP_CORS_METHODS,
+        "Access-Control-Allow-Headers": _APP_CORS_HEADERS_LIST,
+        "Access-Control-Max-Age": "86400",
+        "Vary": "Origin",
+    }
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+    return headers
 
 _VAPI_PROTECTED_PATHS = frozenset({"/place_order", "/draft_order", "/vapi/webhook", "/vapi-webhook"})
 _DASHBOARD_COOKIE_NAME = "gisle_dashboard_session"
@@ -288,13 +315,14 @@ async def log_post_path(request: Request, call_next):
 
 @app.middleware("http")
 async def app_public_cors(request: Request, call_next):
-    """Kundappen på lovable.app behöver öppen CORS. Inga cookies, därför *."""
+    """Kundappen på lovable.app. Ingen *-origin – främmande sajter får inte anropa från webbläsare."""
     if not request.url.path.startswith("/app"):
         return await call_next(request)
+    allowed = _app_allow_origin(request.headers.get("origin") or "")
     if request.method == "OPTIONS":
-        return Response(status_code=204, headers=_APP_CORS_HEADERS)
+        return Response(status_code=204, headers=_app_cors_headers(allowed))
     response = await call_next(request)
-    for key, value in _APP_CORS_HEADERS.items():
+    for key, value in _app_cors_headers(allowed).items():
         response.headers[key] = value
     return response
 
@@ -731,20 +759,22 @@ def _resolve_items_with_menu_match(
 
 
 def calculate_total_price(items: List[OrderItem], rest_id: Optional[str] = None) -> float:
-    """Summera pris från orderrader om priser finns i menyn.
+    """Summera pris från orderraden om servern redan satt det, annars från menyn.
 
-    Priser är avsiktligt borttagna från menyn – betalning sker på plats/i kassan,
-    inte via AI:n. Saknas pris behandlas det som 0 så inget kraschar och ordern
-    fungerar ändå utan att veta vad maten kostar. Returnerar 0.0 när priser saknas.
+    Röstmenyn har inga priser. Kundappen sätter serverberäknat Qopla-pris på raden.
+    Saknas båda blir totalen 0 – betalning sker ändå på plats.
     """
     total = 0.0
     for item in items:
-        menu_item = find_menu_item(item.id, rest_id)
-        if menu_item:
-            try:
-                total += float(menu_item.get("price") or 0) * item.quantity
-            except (TypeError, ValueError):
-                continue
+        amount = item.price
+        if amount is None:
+            menu_item = find_menu_item(item.id, rest_id)
+            amount = menu_item.get("price") if menu_item else None
+        try:
+            if amount is not None:
+                total += float(amount) * item.quantity
+        except (TypeError, ValueError):
+            continue
     return round(total, 2)
 
 def generate_order_id() -> str:
@@ -1361,7 +1391,12 @@ def _commit_order_supabase_first(
     needs_review = (not needs_review)  # True om någon rad är låg konfidens
 
     try:
-        order = _process_place_order(items, special_requests, rest_id=rest_id)
+        order = _process_place_order(
+            items,
+            special_requests,
+            rest_id=rest_id,
+            keep_item_price=(source == "app"),
+        )
     except HTTPException as he:
         if reserved:
             order_service.fail_idempotency(_supabase_client, idempotency_key, f"process_failure: {he.detail}")
@@ -2687,9 +2722,12 @@ async def get_menu(rest_id: Optional[str] = None):
 
 
 def _app_client_ip(request: Request) -> str:
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
+    real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    hops = [part.strip() for part in (request.headers.get("x-forwarded-for") or "").split(",") if part.strip()]
+    if hops:
+        return hops[-1]
     return request.client.host if request.client else ""
 
 
@@ -2823,17 +2861,20 @@ async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Option
             {"unmatched": fail.get("unmatchedItems") or []},
         )
 
+    menu = get_menu_cached(effective_rest_id)
     try:
-        items = [
-            OrderItem(
-                id=it["id"],
-                name=it["name"],
-                quantity=it.get("quantity") or 1,
-                price=it.get("price"),
-                special_requests=it.get("special_requests"),
+        items = []
+        for it in resolved_items:
+            notes = it.get("special_requests")
+            items.append(
+                OrderItem(
+                    id=it["id"],
+                    name=it["name"],
+                    quantity=it.get("quantity") or 1,
+                    price=app_channel.unit_price(it["id"], notes, menu),
+                    special_requests=notes,
+                )
             )
-            for it in resolved_items
-        ]
     except Exception:
         return _app_json_error(400, "Beställningen kunde inte läsas.")
 
@@ -2887,6 +2928,7 @@ async def app_place_order(payload: AppOrderIn, request: Request, rest_id: Option
         "order_id": commit["order_id"],
         "eta": "10–15 minuter",
         "pay_at_pickup": True,
+        "total_price": commit.get("total_price"),
         "replay": bool(commit.get("idempotent_replay")),
     }
 
@@ -3594,6 +3636,7 @@ def _process_place_order(
     items: List[OrderItem],
     special_requests: Optional[str] = None,
     rest_id: Optional[str] = None,
+    keep_item_price: bool = False,
 ) -> Order:
     """Process order: validate, save, print köksbong. rest_id = vilken pizzeria (meny + priser)."""
     enriched_items = []
@@ -3606,11 +3649,12 @@ def _process_place_order(
                 detail="Menu item with ID %s not found" % item.id,
             )
         name = menu_item["name"]
+        price = item.price if keep_item_price and item.price is not None else menu_item.get("price")
         enriched_items.append(OrderItem(
             id=item.id,
             name=name,
             quantity=item.quantity,
-            price=menu_item.get("price"),
+            price=price,
             special_requests=item.special_requests,
         ))
         if item.special_requests and item.special_requests.strip():
