@@ -82,19 +82,16 @@ def opening_hours_label() -> str:
 # Rulle-tillägg (pommes/glutenfri) bara på dessa, inte på pizza.
 _RULLE_ITEM_IDS = {54, 59}
 
-# Kebabtyp på kebab-rätter och pizzor som faktiskt har kebabkött — inte på Vesuvio.
-_KEBAB_PIZZA_IDS = {35, 36, 37, 38, 39, 40, 41, 49, 51, 52}
-
 # Svenska etiketter + regler. options kommer från menu.json (_meta.modifiers).
 GROUP_META: Dict[str, Dict[str, Any]] = {
     "pizza_storlek": {
         "label": "Storlek",
         "selection": "single",
         "required": True,
-        "default": "Vanlig",
+        "default": "Standard",
     },
     "pizza_botten": {
-        "label": "Botten",
+        "label": "Smak",
         "selection": "single",
         "required": True,
         "default": "Vanlig botten",
@@ -112,7 +109,7 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
         "default": None,
     },
     "pizza_tillagg": {
-        "label": "Extra",
+        "label": "Extra topping",
         "selection": "multi",
         "required": False,
         "default": None,
@@ -136,7 +133,7 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
         "default": None,
     },
     "barnportion": {
-        "label": "Barnportion",
+        "label": "Barn?",
         "selection": "single",
         "required": False,
         "default": None,
@@ -145,7 +142,7 @@ GROUP_META: Dict[str, Dict[str, Any]] = {
 
 # Fallback om en äldre klient inte läser dish.groups.
 CATEGORY_GROUPS: Dict[str, List[str]] = {
-    "pizzas": ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"],
+    "pizzas": ["pizza_storlek", "pizza_botten", "kebabtyp", "pizza_tillagg", "barnportion"],
     "kebabs": ["kebabtyp", "saser", "barnportion"],
     "kyckling": ["saser", "barnportion"],
     "sallader": ["sas_tillval"],
@@ -162,20 +159,6 @@ def _as_int_id(value: Any) -> Optional[int]:
         return None
 
 
-def _dish_has_kebab_meat(item: dict) -> bool:
-    """True om rätten är kebabkött — inte bara kebabsås på kycklingpizza."""
-    item_id = _as_int_id(item.get("id"))
-    if item_id in _KEBAB_PIZZA_IDS:
-        return True
-    name = str(item.get("name") or "")
-    desc = str(item.get("description") or "")
-    blob = f"{name} {desc}".casefold()
-    if "kebabkött" in blob:
-        return True
-    name_l = name.casefold()
-    return "kebab" in name_l and "sås" not in name_l
-
-
 def _is_rulle(item: dict) -> bool:
     item_id = _as_int_id(item.get("id"))
     if item_id in _RULLE_ITEM_IDS:
@@ -186,10 +169,7 @@ def _is_rulle(item: dict) -> bool:
 def dish_modifier_groups(category: str, item: dict) -> List[str]:
     """Tillvalsgrupper som hör till just den här rätten."""
     if category == "pizzas":
-        groups = ["pizza_storlek", "pizza_botten", "pizza_tillagg", "barnportion"]
-        if _dish_has_kebab_meat(item):
-            groups.insert(2, "kebabtyp")
-        return groups
+        return ["pizza_storlek", "pizza_botten", "kebabtyp", "pizza_tillagg", "barnportion"]
     if category == "kebabs":
         groups = ["kebabtyp", "saser", "barnportion"]
         if _is_rulle(item):
@@ -335,6 +315,8 @@ def public_modifiers(menu: dict) -> dict:
             options = [o for o in options if o.casefold() != _BARNPORTION_LABEL.casefold()]
         elif key == "kebabrulle_tillagg":
             options = [o for o in options if o.casefold() != _BARNPORTION_LABEL.casefold()]
+        elif key == "pizza_storlek":
+            options = ["Standard" if o.casefold() == "vanlig" else o for o in options]
         if not options:
             continue
         groups[str(key)] = _publish_group(str(key), options, extra)
