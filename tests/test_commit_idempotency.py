@@ -76,6 +76,15 @@ def _commit(_db, **overrides):
     return M._commit_order_supabase_first(**args)
 
 
+def test_app_source_is_stored(_reset_main):
+    db = _reset_main
+    res = _commit(db, source="app", vapi_call_id="app-req-1", vapi_tool_call_id="app-order")
+    assert res["success"]
+    rows = db.get_orders()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "app"
+
+
 def test_five_retries_create_one_order(_reset_main):
     db = _reset_main
     results = [_commit(db) for _ in range(5)]

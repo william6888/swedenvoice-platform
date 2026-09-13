@@ -93,8 +93,8 @@ def test_canonical_readback_format():
         240.0,
         special_requests="extra ost",
     )
-    assert "Två Capri" in text
-    assert "Övrigt: extra ost" in text
+    assert "två capri" in text
+    assert "övrigt extra ost" in text
     assert "Totalt: 240" in text
 
 
@@ -103,9 +103,10 @@ def test_verbal_readback_no_prices():
         [{"id": 1, "name": "Capri", "quantity": 2}],
         special_requests="extra ost",
     )
-    assert "Två Capri" in text
+    assert "två capri" in text
     assert "kr" not in text
-    assert "Övrigt: extra ost" in text
+    assert "övrigt extra ost" in text
+    assert text == text.lower()
 
 
 def test_verbal_readback_keeps_modifiers_per_item_and_service_mode():
@@ -127,5 +128,36 @@ def test_verbal_readback_keeps_modifiers_per_item_and_service_mode():
         special_requests="Ta med",
     )
     assert text == (
-        "En Vesuvio, familj och en Kebabpizza, mild sås, för att ta med."
+        "en vesuvio, familj och en kebabpizza, mild sås"
     )
+
+
+def test_verbal_readback_speaks_grams_and_drink_sizes():
+    text = confirmation.format_verbal_readback(
+        [
+            {
+                "id": 82,
+                "name": "200g tallrik",
+                "quantity": 1,
+                "special_requests": "mos",
+            },
+            {
+                "id": 103,
+                "name": "33cl",
+                "quantity": 1,
+                "special_requests": "cola",
+            },
+        ]
+    )
+    assert "tvåhundra gram tallrik" in text
+    assert "200g" not in text
+    assert "trettiotre" in text
+    assert "cola" in text
+
+
+def test_verbal_readback_speaks_one_and_a_half_liter():
+    text = confirmation.format_verbal_readback(
+        [{"id": 106, "name": "1.5 liter", "quantity": 1, "special_requests": "pepsi max"}]
+    )
+    assert "en och en halv liter" in text
+    assert "1.5" not in text

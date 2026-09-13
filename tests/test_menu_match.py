@@ -89,6 +89,56 @@ class TestExactAndAlias(unittest.TestCase):
         self.assertIn(m["type"], ("exact", "alias"))
         self.assertEqual(m["itemId"], 25)
 
+    def test_cola_without_size_is_not_auto_accepted(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("cola", "g1")
+        self.assertIn(m["type"], ("fuzzy_ambiguous", "no_match"))
+
+    def test_cola_33_matches_size_sku(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("cola 33", "g1")
+        self.assertIn(m["type"], ("exact", "alias"))
+        self.assertEqual(m["canonicalName"], "33cl")
+
+    def test_stor_pepsi_max_is_one_and_a_half_liter(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("stor pepsi max", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "1.5 liter")
+
+    def test_stor_cola_is_two_liter_not_one_and_a_half(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("stor cola", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "2 liter")
+
+    def test_pepsi_max_two_liter_is_not_auto_2l(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("pepsi max 2 liter", "g1")
+        self.assertNotEqual(m.get("canonicalName"), "2 liter")
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("200g med mos", "g1")
+        self.assertEqual(m["type"], "alias")
+        self.assertEqual(m["canonicalName"], "200g tallrik")
+
 
 class TestFuzzyAuto(unittest.TestCase):
     def test_capriciosa(self):

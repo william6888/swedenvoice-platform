@@ -20,7 +20,7 @@ def test_menu_names_contain_no_llm_controlled_ids():
 def test_tenant_prompt_replaces_brand_and_menu_section():
     menu = {"pizzas": [{"id": 501, "name": "Roma Special"}]}
     prompt = build_system_prompt("Pizzeria Roma", menu)
-    assert "den som svarar i telefonen på Pizzeria Roma" in prompt
+    assert "Du svarar i telefonen på Pizzeria Roma" in prompt
     assert "Pizzor: Roma Special." in prompt
     assert "Capricciosa, Vesuvio" not in prompt
     assert "# Exempel" in prompt
@@ -34,3 +34,4 @@ def test_current_menu_can_generate_prompt():
     assert "Kebabpizza" in prompt
     assert "Kebabtallrik med mos" in prompt
     assert "Polisen=52" not in prompt
+    assert "Dryck: 33cl, 50cl, 2 liter, 1.5 liter." in prompt

@@ -52,6 +52,7 @@ CATEGORY_LABELS = {
     "korv": "Korv",
     "ovrigt": "Övrigt",
     "tillbehor": "Tillbehör",
+    "drycker": "Dryck",
 }
 
 
@@ -240,9 +241,10 @@ def main() -> None:
         }
         for k in ("voice", "transcriber", "firstMessage", "firstMessageMode",
                   "silenceTimeoutSeconds", "maxDurationSeconds", "backgroundSound",
-                  "stopSpeakingPlan", "startSpeakingPlan"):
+                  "stopSpeakingPlan", "startSpeakingPlan", "endCallMessage", "hooks"):
             if template.get(k) is not None:
                 payload[k] = template[k]
+        payload["firstMessage"] = f"välkommen till {args.name}, vad vill du beställa?"
 
         na = httpx.post("https://api.vapi.ai/assistant", headers=vh, json=payload, timeout=30)
         if not na.is_success:

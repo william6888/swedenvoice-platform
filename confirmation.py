@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -113,6 +114,25 @@ def verify_draft_token(
     return (True, payload, None)
 
 
+_SPEAKABLE_NAME_SUBS = (
+    (re.compile(r"\b200g\b", re.IGNORECASE), "tvåhundra gram"),
+    (re.compile(r"\b150g\b", re.IGNORECASE), "etthundrafemtio gram"),
+    (re.compile(r"\b90g\b", re.IGNORECASE), "nittio gram"),
+    (re.compile(r"\b33cl\b", re.IGNORECASE), "trettiotre"),
+    (re.compile(r"\b50cl\b", re.IGNORECASE), "femtio"),
+    (re.compile(r"\b2\s*liter\b", re.IGNORECASE), "två liter"),
+    (re.compile(r"\b1[.,]5\s*liter\b", re.IGNORECASE), "en och en halv liter"),
+)
+
+
+def _speakable_item_name(name: str) -> str:
+    """Gör menynamn läsbara i TTS utan att hugga vid g eller cl."""
+    out = name
+    for pattern, spoken in _SPEAKABLE_NAME_SUBS:
+        out = pattern.sub(spoken, out)
+    return out
+
+
 def format_verbal_readback(items: list, special_requests: str = "") -> str:
     """
     Text AI ska läsa upp för kunden – inga priser, inga id-nummer (matchar original-prompt).
@@ -123,7 +143,7 @@ def format_verbal_readback(items: list, special_requests: str = "") -> str:
             qty = int(it.get("quantity") or 1)
         except Exception:
             qty = 1
-        name = str(it.get("name") or "okänd").strip()
+        name = _speakable_item_name(str(it.get("name") or "okänd").strip())
         sr = (it.get("special_requests") or it.get("notes") or "").strip()
         if qty == 1:
             line = f"en {name}"
@@ -138,27 +158,25 @@ def format_verbal_readback(items: list, special_requests: str = "") -> str:
         parts.append(line)
 
     if not parts:
-        return "Ingen beställning."
+        return "ingen beställning"
 
     if len(parts) == 1:
         text = parts[0]
     else:
         text = ", ".join(parts[:-1]) + " och " + parts[-1]
-    text = text[:1].upper() + text[1:]
 
     order_notes = (special_requests or "").strip()
     normalized = order_notes.casefold().replace("_", " ")
     if normalized.startswith("ta med"):
-        text += ", för att ta med"
         order_notes = order_notes[len("ta med"):].lstrip(" .;,:")
     elif normalized.startswith("äta här") or normalized.startswith("ata har"):
         prefix_len = len("äta här") if normalized.startswith("äta här") else len("ata har")
-        text += ", för att äta här"
         order_notes = order_notes[prefix_len:].lstrip(" .;,:")
 
     if order_notes:
-        text += f". Övrigt: {order_notes}"
-    return text + "."
+        text += f", övrigt {order_notes}"
+    # Små bokstäver så TTS inte läser matnamn som frågor.
+    return text.lower()
 
 
 def format_canonical_readback(items: list, total_price: float, special_requests: str = "") -> str:

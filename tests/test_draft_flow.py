@@ -88,7 +88,8 @@ def test_draft_order_params_returns_readback(monkeypatch):
     assert result["name"] == "draft_order"
     payload = json.loads(result["result"])
     assert payload["success"] is True
-    assert "Capricciosa" in payload["readback"]
+    assert "capricciosa" in payload["readback"]
+    assert payload["readback"] == payload["readback"].lower()
     assert "draft_token" not in payload
     assert "kr" not in payload["readback"]
     cached = M._get_cached_draft_for_call("call-draft-1")
@@ -120,7 +121,7 @@ def test_draft_order_uses_service_mode_and_per_item_modifier(monkeypatch):
     )
     payload = json.loads(result["result"])
     assert payload["success"] is True
-    assert payload["readback"] == "En Vesuvio, familj, för att ta med."
+    assert payload["readback"] == "en vesuvio, familj"
 
 
 def test_place_order_uses_cached_draft_token_when_required(monkeypatch, _reset_main):
@@ -223,3 +224,27 @@ def test_strict_place_rejects_payload_changed_after_readback(monkeypatch, _reset
     payload = json.loads(place_res["result"])
     assert payload["success"] is False
     assert "valideras och läsas upp igen" in payload["error"]
+
+
+def test_cola_on_1_5_liter_is_rewritten_to_2_liter():
+    items = M._normalize_drink_items(
+        [{"name": "1.5 liter", "quantity": 1, "special_requests": "cola"}]
+    )
+    assert items[0]["name"] == "2 liter"
+    pepsi = M._normalize_drink_items(
+        [{"name": "2 liter", "quantity": 1, "special_requests": "pepsi max"}]
+    )
+    assert pepsi[0]["name"] == "1.5 liter"
+
+
+def test_service_mode_is_not_copied_into_order_notes():
+    assert M._order_special_requests_from_params({"service_mode": "ta_med"}) == ""
+    assert M._order_special_requests_from_params({"service_mode": "äta_här"}) == ""
+    assert M._order_special_requests_from_params({
+        "service_mode": "ta_med",
+        "special_requests": "utan lök, laktos",
+    }) == "utan lök, laktos"
+    assert M._order_special_requests_from_params({
+        "special_requests": "Ta med. extra ost",
+    }) == "extra ost"
+    assert M._strip_service_mode_from_notes("Äta här") == ""
