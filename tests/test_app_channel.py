@@ -89,7 +89,7 @@ def test_compose_special_requests_and_menu_strip():
     mods = C.public_modifiers({
         "_meta": {"modifiers": {"saser": ["Mild", "Stark"]}},
     })
-    assert mods["modifiers"]["saser"]["options"] == ["Mild", "Stark"]
+    assert [o["label"] for o in mods["modifiers"]["saser"]["options"]] == ["Mild sås", "Stark sås"]
     assert mods["modifiers"]["saser"]["label"] == "Sås"
     assert mods["modifiers"]["saser"]["selection"] == "single"
 
@@ -144,14 +144,41 @@ def test_public_menu_scopes_modifiers_per_dish():
     mods = C.public_modifiers(menu)
     assert mods["modifiers"]["pizza_storlek"]["label"] == "Storlek"
     assert mods["modifiers"]["pizza_storlek"]["default"] == "Standard"
-    assert mods["modifiers"]["pizza_storlek"]["options"][0] == "Standard"
+    assert mods["modifiers"]["pizza_storlek"]["options"][0]["label"] == "Standard"
     assert mods["modifiers"]["pizza_storlek"]["required"] is True
     assert mods["modifiers"]["pizza_botten"]["label"] == "Smak"
+    tillagg = [o["label"] for o in mods["modifiers"]["pizza_tillagg"]["options"]]
+    rulle = [o["label"] for o in mods["modifiers"]["kebabrulle_tillagg"]["options"]]
     assert mods["modifiers"]["pizza_tillagg"]["label"] == "Extra topping"
-    assert "Barnportion" not in mods["modifiers"]["pizza_tillagg"]["options"]
-    assert "Extra fläskfilé" in mods["modifiers"]["pizza_tillagg"]["options"]
-    assert "Barnportion" not in mods["modifiers"]["kebabrulle_tillagg"]["options"]
-    assert mods["modifiers"]["barnportion"]["options"] == ["Barnportion"]
+    assert "Barnportion" not in tillagg
+    assert "Extra Fläskfilé" in tillagg
+    extra_ost = next(o for o in mods["modifiers"]["pizza_tillagg"]["options"] if o["label"] == "Extra Ost")
+    assert extra_ost["price"] == 15
+    gluten = next(o for o in mods["modifiers"]["pizza_botten"]["options"] if "Glutenfri" in o["label"])
+    assert gluten["price"] == 30
+    assert "Barnportion" not in rulle
+    assert mods["modifiers"]["barnportion"]["options"][0]["label"] == "Barnportion"
+    assert mods["modifiers"]["barnportion"]["options"][0]["price"] == -10
     assert mods["modifiers"]["barnportion"]["label"] == "Barn?"
     assert mods["modifiers"]["pizza_tillagg"]["selection"] == "multi"
     assert "kebabtyp" in mods["category_groups"]["pizzas"]
+    capricciosa = next(d for d in public["pizzas"] if d["name"] == "Capricciosa")
+    assert capricciosa["price"] == 130
+    assert capricciosa["price_family"] == 320
+    ibbe = next(d for d in public["pizzas"] if "Ibbe" in d["name"])
+    assert ibbe["name"] == "Ibbe-Special"
+    assert ibbe["price"] == 160
+    assert ibbe["price_family"] == 380
+    assert C.CATEGORY_LABELS["pizzas"] == "Pizza"
+    assert C.CATEGORY_LABELS["sallader"] == "Sallader"
+
+
+def test_server_prices_ignore_client_and_use_qopla():
+    import json
+    from pathlib import Path
+
+    menu = json.loads(Path("menu.json").read_text(encoding="utf-8"))
+    assert C.unit_price(1, "Standard, Vanlig botten", menu) == 130
+    assert C.unit_price(1, "Familj, Glutenfri botten", menu) == 350
+    assert C.unit_price(1, "standard, extra ost", menu) == 145
+    assert C.unit_price(54, "Pommes", menu) == 155
