@@ -79,26 +79,89 @@ def build_menu_names(menu: dict) -> str:
 
 
 def build_system_prompt(name: str, menu: dict) -> str:
-    """Bygg tenantens system-prompt från Gislegrillen-mallen: byt namn + meny."""
-    template = (ROOT / "system_prompt.md").read_text(encoding="utf-8")
-    # Byt varumärke i personlighetsraden.
-    prompt = template.replace("Gislegrillen", name)
-    # Ersätt bara menysektionen och behåll exemplen efter den.
-    marker = "# Menynamn"
-    next_marker = "# Exempel"
-    if marker in prompt and next_marker in prompt:
-        head, remainder = prompt.split(marker, 1)
-        _, tail = remainder.split(next_marker, 1)
-        prompt = (
-            head
-            + marker
-            + "\n"
-            + build_menu_names(menu)
-            + "\n\n"
-            + next_marker
-            + tail
-        )
-    return prompt
+    """Sätt ihop gemensamma samtalsregler, restaurangens meny och exempel."""
+    rules = (ROOT / "voice_conversation_rules.md").read_text(encoding="utf-8")
+    examples = (ROOT / "voice_examples.md").read_text(encoding="utf-8")
+    return (
+        rules.replace("{{RESTAURANT_NAME}}", name).rstrip()
+        + "\n\n# Menynamn\n"
+        + build_menu_names(menu)
+        + "\n\n# Exempel\n"
+        + examples.replace("{{RESTAURANT_NAME}}", name).lstrip()
+    )
+
+
+# Function tools reject timeoutSeconds/backoffPlan (Vapi 400). The values
+# below are the intended API Request-tool settings from Vapi reliability docs.
+TOOL_TIMEOUT_SECONDS = 20
+TOOL_BACKOFF_PLAN = {"type": "fixed", "maxRetries": 0, "baseDelaySeconds": 1}
+PLACE_ORDER_GOODBYE = "din beställning är klar om tio minuter, en kvart, välkommen"
+
+DRAFT_ORDER_FUNCTION = {
+    "name": "draft_order",
+    "strict": True,
+    "description": (
+        "Validera menyn och returnera readback. Anropa när kunden är klar "
+        "(nej, inget mer, eller att det är bra). Säg inget extra medan det går. Sparar inte."
+    ),
+}
+
+PLACE_ORDER_FUNCTION = {
+    "name": "place_order",
+    "strict": True,
+    "description": (
+        "Spara ordern efter uppläsning och kundens ja. Inte före. "
+        "Säg inget extra medan det går. Framgångsägning kommer bara om backend sparat."
+    ),
+}
+
+DRAFT_ORDER_MESSAGES = [
+    {"type": "request-start", "content": "okej,", "blocking": False},
+    {
+        "type": "request-response-delayed",
+        "content": "det tar en sekund till,",
+        "timingMilliseconds": 5000,
+    },
+    {
+        "role": "system",
+        "type": "request-complete",
+        "content": (
+            "läs readback med små bokstäver, en mening, inga frågetecken på namnen, "
+            "hoppa över för att ta med, avsluta med är det bra så?"
+        ),
+    },
+    {
+        "role": "system",
+        "type": "request-failed",
+        "content": (
+            "fråga bara det som saknas, en sak i taget. gissa inte rätter, "
+            "storlekar, drycker eller priser. lova inte att något är sparat."
+        ),
+    },
+]
+
+PLACE_ORDER_MESSAGES = [
+    {"type": "request-start", "content": "okej,", "blocking": False},
+    {
+        "type": "request-response-delayed",
+        "content": "det tar en sekund till,",
+        "timingMilliseconds": 5000,
+    },
+    {
+        "type": "request-complete",
+        "content": PLACE_ORDER_GOODBYE,
+        "contents": [{"text": PLACE_ORDER_GOODBYE, "type": "text", "language": "sv"}],
+        "endCallAfterSpokenEnabled": True,
+    },
+    {
+        "role": "system",
+        "type": "request-failed",
+        "content": (
+            "läs readback igen med små bokstäver och fråga är det bra så? "
+            "lova inte att ordern är sparad. anropa inte endCall."
+        ),
+    },
+]
 
 
 def main() -> None:
@@ -188,15 +251,22 @@ def main() -> None:
         new_order_tool_ids = []
         for tool_name in ("draft_order", "place_order"):
             tool_template = order_tool_templates[tool_name]
+            function = dict(tool_template["function"])
+            if tool_name == "draft_order":
+                function["description"] = DRAFT_ORDER_FUNCTION["description"]
+                messages = DRAFT_ORDER_MESSAGES
+            else:
+                function["description"] = PLACE_ORDER_FUNCTION["description"]
+                messages = PLACE_ORDER_MESSAGES
             tool_payload = {
                 "type": "function",
-                "function": tool_template["function"],
+                "function": function,
                 "server": {
                     "url": vapi_server_url,
                     "headers": {"X-Webhook-Secret": WEBHOOK_SHARED_SECRET},
                 },
                 "async": False,
-                "messages": tool_template.get("messages") or [],
+                "messages": messages,
             }
             # place_order must not copy a confirmation rejectionPlan. A rejected
             # tool call previously made the assistant transfer instead of reading
@@ -245,6 +315,9 @@ def main() -> None:
             if template.get(k) is not None:
                 payload[k] = template[k]
         payload["firstMessage"] = f"välkommen till {args.name}, vad vill du beställa?"
+        ssp = dict(payload.get("stopSpeakingPlan") or {})
+        ssp["acknowledgementPhrases"] = []
+        payload["stopSpeakingPlan"] = ssp
 
         na = httpx.post("https://api.vapi.ai/assistant", headers=vh, json=payload, timeout=30)
         if not na.is_success:

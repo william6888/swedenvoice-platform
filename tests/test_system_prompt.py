@@ -12,8 +12,21 @@ def test_prompt_forbids_wait_filler_and_form_words():
     lowered = PROMPT.casefold()
     assert "serveringsform" not in lowered
     assert "vänta en sekund" not in lowered
+    assert "då läser jag upp" not in lowered
+    assert "då slår jag in den" not in lowered
+    assert "beställningen är lagd" not in lowered
     assert "varsågod" in lowered
     assert "säg inte varsågod" in lowered
+
+
+def test_prompt_follows_reusable_restaurant_flow():
+    assert "# Flöde" in PROMPT
+    assert "Gissa aldrig" in PROMPT
+    assert "En fråga i taget" in PROMPT
+    assert "gemensamma för alla restauranger" in PROMPT
+    assert "# Menynamn" in PROMPT
+    assert "Säg inget extra medan" in PROMPT
+    assert "Inte lova att något är sparat" in PROMPT
 
 
 def test_prompt_requires_human_order_taking():
