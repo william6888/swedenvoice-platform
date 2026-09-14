@@ -44,7 +44,9 @@ Supabase-projekt: `zgllqocecavcgctbduip`.
 | **menu_match.py** | Menymatchning (id/exact/alias/fuzzy) mot tenantens meny. |
 | **index.html** | Köksdashboard (XSS-säker), läser via `/orders`. |
 | **menu.json** | Gislegrillens meny (kategorier → listor med `id`, `name`, `aliases`, `description`). Inga priser. `_meta` = referensdata (modifierare/gluten). |
-| **system_prompt.md** | AI-personlighet/flöde för Vapi (opt-in-modifierare, äta här/ta med, inga priser). ID-kartan matchar `menu.json`. |
+| **system_prompt.md** | Gislegrillens sammansatta Vapi-prompt (regler + meny + exempel). |
+| **voice_conversation_rules.md** | Gemensamma samtalsregler för alla restauranger (`{{RESTAURANT_NAME}}`). |
+| **voice_examples.md** | Gemensamma kassa-exempel. |
 | **test_system.py** | Röktest som CI kör (inga externa tjänster). |
 | **env_loader.py** | Minimal read-only `.env`-läsare. Ersätter `python-dotenv` så runtime inte har dess muterande `set_key`-yta. |
 | **tests/** | Pytest-svit (129 tester): order_integrity, menu_match, draft-flöde, idempotency/commit, API/tenant-auth, env-loader, ops_agent, ops_worker, backup/restore, sms-format, m.m. Testerna isolerar alltid live-Supabase. |
