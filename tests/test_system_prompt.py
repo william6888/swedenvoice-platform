@@ -65,3 +65,5 @@ def test_prompt_keeps_kebab_family_and_readback_contract():
     assert "sås till båda eller bara en?" in PROMPT
     assert "Anropa inte draft_order förrän" in PROMPT
     assert "Aldrig cl" in PROMPT
+    assert "Avbryts uppläsningen" in PROMPT
+    assert "nekade" in PROMPT or "Inte koppla" in PROMPT

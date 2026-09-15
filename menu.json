@@ -81,7 +81,7 @@
     {"id": 32, "name": "GSK-Special", "description": "Skinka, lök, bacon, fläskfilé, bearnaisesås"},
     {"id": 33, "name": "GIS-Special", "description": "Skinka, champinjoner, lök, fläskfilé, kebabsås"},
     {"id": 34, "name": "Småland", "aliases": ["småland pizza", "smaland pizza"], "description": "Skinka, pommes, kebabsås"},
-    {"id": 35, "name": "Kebabpizza", "description": "Lök, champinjoner, kebabkött, kebabsås"},
+    {"id": 35, "name": "Kebabpizza", "aliases": ["kebabfamiljepizza", "kebab familjepizza", "kebabfamilj", "stor kebabpizza", "kebabpizza familj"], "description": "Lök, champinjoner, kebabkött, kebabsås"},
     {"id": 36, "name": "Batman", "description": "Skinka, kebabkött, kebabsås"},
     {"id": 37, "name": "Hammare", "description": "Kebabkött, pommes, kebabsås"},
     {"id": 38, "name": "Sverige", "description": "Lök, kebabkött, sallad, kebabsås"},

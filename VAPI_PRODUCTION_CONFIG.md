@@ -11,7 +11,7 @@ Do not ask äta här / ta med. Do not speak tool-fillers.
 ## Stack
 
 - Model: OpenAI `gpt-5.6-luna`, reasoning `none`, temperature `0.3`,
-  max tokens `280`. Prompt cache key `gislegrillen-order-v17`.
+  max tokens `280`. Prompt cache key `gislegrillen-order-v18`.
 - Voice: ElevenLabs Jonas, `eleven_flash_v2_5`, language `sv`, speed `1.0`,
   stability `0.75`, `optimizeStreamingLatency` `3`. Chunk min 30.
 - firstMessage: `välkommen till gislegrillen, vad vill du beställa?`
@@ -24,20 +24,24 @@ Do not ask äta här / ta med. Do not speak tool-fillers.
 ## Flow
 
 Take order → `draft_order` → read back → confirm → `place_order` →
-spoken goodbye only after HTTP 2xx → hang up.
+spoken goodbye only after a successful function-tool `result` → hang up.
 
-Backend returns **422** when save/validate fails so Vapi runs
-`request-failed`, not request-complete. Menu match, prices (none spoken),
-draft-token, and per-call duplicate place_order are enforced in `main.py`.
+Interrupted readback or a correction: new `draft_order`, new yes, then save.
 
-## Tool wait (Vapi reliability)
+These are **function tools**. A handled failure is HTTP **200** with:
+
+`{"results":[{"toolCallId":"<id>","error":"Order was not saved: <reason>."}]}`
+
+Do not return HTTP 422 for a handled save/validate failure. Menu match,
+drink brand+size, draft-token, and per-call duplicate place_order are
+enforced in `main.py`. If a save exception happens, look up a completed
+order for that call before retrying.
+
+## Tool wait
 
 One brief request-start. Delayed message only if the HTTP call is still
-open after 5 seconds. Function tools (`draft_order` / `place_order`) do
-not accept `timeoutSeconds` or `backoffPlan` in the Vapi API; those
-fields are for API Request tools. Duplicate saves are blocked in the
-backend (draft-token + per-call idempotency). Failed saves return HTTP
-**422** so Vapi runs request-failed instead of goodbye.
+open after 5 seconds. Function tools do not accept `timeoutSeconds` or
+`backoffPlan`.
 
 `draft_order` / `place_order`:
 
@@ -45,22 +49,22 @@ backend (draft-token + per-call idempotency). Failed saves return HTTP
 - request-response-delayed: 5000 ms, `det tar en sekund till,`
 - `draft_order` request-complete: **system** (read the `readback`)
 - `place_order` request-complete: **one** spoken goodbye, then hang up
-- request-failed: **system** (do not promise the order is saved)
+- request-failed: **system**, speak the `error` string. Do not transfer.
 
-Do not add a second `place_order` request-complete. Empty start/delayed
-content is not allowed: Vapi may play a default filler, and the model
-then talks over it.
+Do not add a second `place_order` request-complete. `place_order` has no
+rejectionPlan.
 
 ## Interruption and pronunciation
 
-`stopSpeakingPlan.acknowledgementPhrases` must not include `va`, `hallå`,
-or `hej` — those cut off the goodbye. Chunk replacements:
+`acknowledgementPhrases` **suppress** barge-in (mm, okej, ja, jaha, va,
+hallå, mhm). `numWords` is 2. Chunk replacements:
 
-- `Gislegrillen` / `gislegrillen` → `yislegrillen` (one word, not Gissle / Gisle-grillen)
+- `Gislegrillen` / `gislegrillen` → `yislegrillen`
 - `Ciao-Ciao` / `ciao-ciao` → `tjao-tjao`
 - `33cl` → `trettiotre`, `50cl` → `femtio`, `1.5 liter` → `en och en halv liter`
 
 Stor cola/fanta/sprite = `2 liter`. Only stor pepsi max = `1.5 liter`.
+Unsupported brand+size pairs are rejected by the backend.
 
 ## Required order tools
 

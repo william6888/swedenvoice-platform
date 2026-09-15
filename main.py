@@ -143,7 +143,7 @@ except ValueError:
     OPS_AGENT_INTERVAL_SEC = 90
 
 # Build-tagg: bumpa vid deploy så /health visar vilken version som kör i produktion.
-BUILD_TAG = "2026-09-14-vapi-akash-v1"
+BUILD_TAG = "2026-09-15-vapi-akash-v2"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -695,24 +695,71 @@ _DRINK_2L = {
 }
 
 
-def _normalize_drink_items(items_data: list) -> list:
-    """Stor cola är 2 liter. Bara stor pepsi max är 1.5 liter."""
-    out = []
+def _drink_blob(item: dict) -> str:
+    name = str(item.get("name") or "").strip()
+    notes = str(item.get("special_requests") or item.get("notes") or "").strip()
+    return f"{name} {notes}".casefold().replace(",", ".")
+
+
+def _blob_has_15_liter(blob: str, name_key: str) -> bool:
+    if name_key in _DRINK_15:
+        return True
+    return any(token in blob for token in ("1.5 liter", "1.5l", "1.5 l", "en och en halv"))
+
+
+def _blob_has_2_liter(blob: str, name_key: str) -> bool:
+    if name_key in _DRINK_2L:
+        return True
+    return any(token in blob for token in ("2 liter", "2l", "2 l", "två liter"))
+
+
+def _unsupported_drink_combo_error(items_data: list) -> Optional[str]:
+    """Reject brand+size pairs that are not on the menu so they cannot be saved."""
     for raw in items_data or []:
         if not isinstance(raw, dict):
-            out.append(raw)
             continue
-        item = dict(raw)
-        name = str(item.get("name") or "").strip()
-        notes = str(item.get("special_requests") or item.get("notes") or "").strip()
-        blob = f"{name} {notes}".casefold().replace(",", ".")
+        blob = _drink_blob(raw)
+        name_key = str(raw.get("name") or "").strip().casefold().replace(",", ".")
         pepsi_max = any(marker in blob for marker in _PEPSI_MAX_MARKERS)
         other_soda = (not pepsi_max) and any(marker in blob for marker in _OTHER_SODA_MARKERS)
-        name_key = name.casefold().replace(",", ".")
-        if pepsi_max and name_key in _DRINK_2L:
-            item["name"] = "1.5 liter"
-        elif other_soda and name_key in _DRINK_15:
-            item["name"] = "2 liter"
+        has_15 = _blob_has_15_liter(blob, name_key)
+        has_2l = _blob_has_2_liter(blob, name_key)
+        if other_soda and has_15:
+            return "cola/fanta/sprite is 2 liter, not 1.5 liter."
+        if pepsi_max and has_2l:
+            return "pepsi max is 1.5 liter, not 2 liter."
+        if has_15 and not pepsi_max:
+            return "1.5 liter is only pepsi max. cola/fanta/sprite is 2 liter."
+    return None
+
+
+def _normalize_drink_items(items_data: list) -> list:
+    """Copy drink rows; illegal brand+size pairs are rejected separately."""
+    out = []
+    for raw in items_data or []:
+        out.append(dict(raw) if isinstance(raw, dict) else raw)
+    return out
+
+
+def _remap_family_kebab_bread(resolved: list, index: Optional[menu_match.MenuIndex]) -> list:
+    """Kebab med bröd + familj is kebab family pizza, not pita kebab."""
+    if not index or not resolved:
+        return resolved
+    kebabpizza_id = None
+    for item_id, canon in index.canonical_by_id.items():
+        if canon == "Kebabpizza":
+            kebabpizza_id = item_id
+            break
+    if kebabpizza_id is None:
+        return resolved
+    out = []
+    for row in resolved:
+        item = dict(row)
+        notes = str(item.get("special_requests") or "").casefold()
+        name = str(item.get("name") or "").casefold()
+        if "familj" in notes and name.startswith("kebab med br"):
+            item["id"] = kebabpizza_id
+            item["name"] = "Kebabpizza"
         out.append(item)
     return out
 
@@ -746,16 +793,23 @@ def _resolve_items_with_menu_match(
             ),
         )
     items_data = _normalize_drink_items(items_data)
-    ok, resolved, unmatched = menu_match.resolve_order_items(items_data, index, rest_id)
-    if not ok:
+    drink_error = _unsupported_drink_combo_error(items_data)
+    if drink_error:
         return (
             False,
             None,
-            menu_match.place_order_fail_json(
-                "En eller flera rätter kunde inte matchas",
-                unmatched,
-            ),
+            menu_match.place_order_fail_json(drink_error, []),
         )
+    ok, resolved, unmatched = menu_match.resolve_order_items(items_data, index, rest_id)
+    if not ok:
+        labels = [str(u.get("input") or "").strip() for u in unmatched if str(u.get("input") or "").strip()]
+        detail = f"could not match {', '.join(labels)}" if labels else "one or more items could not be matched"
+        return (
+            False,
+            None,
+            menu_match.place_order_fail_json(detail, unmatched),
+        )
+    resolved = _remap_family_kebab_bread(resolved, index)
     return (True, resolved, "")
 
 
@@ -3289,7 +3343,7 @@ def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
     out: List[Tuple[str, str, dict]] = []
 
     def _add_from_tc(tc: dict) -> None:
-        cid = tc.get("id", "unknown")
+        cid = tc.get("id") or tc.get("toolCallId") or "unknown"
         if cid in seen_ids:
             return
         fn = tc.get("function") or tc
@@ -3315,7 +3369,7 @@ def _extract_vapi_tool_calls(msg: dict) -> List[Tuple[str, str, dict]]:
         if tname not in ("place_order", "draft_order"):
             continue
         tc = t.get("toolCall", {})
-        cid = tc.get("id", "unknown")
+        cid = tc.get("id") or tc.get("toolCallId") or "unknown"
         if cid in seen_ids:
             continue
         seen_ids.add(cid)
@@ -3405,9 +3459,30 @@ def _params_from_direct_place_order_payload(body: dict) -> dict:
     return body
 
 
+def _incoming_tool_call_id(body: Any, default: str) -> str:
+    """Use the webhook's toolCallId when present; never invent a second id."""
+    if not isinstance(body, dict):
+        return default
+    for key in ("toolCallId", "tool_call_id"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    nested = body.get("toolCall") or body.get("tool_call")
+    if isinstance(nested, dict):
+        cid = nested.get("id") or nested.get("toolCallId")
+        if isinstance(cid, str) and cid.strip():
+            return cid.strip()
+    msg = body.get("message")
+    if isinstance(msg, dict):
+        calls = _extract_vapi_tool_calls(msg)
+        if calls and calls[0][0]:
+            return str(calls[0][0])
+    return default
+
+
 def _tool_handler_succeeded(result: dict) -> bool:
     """False när backend nekat ordern – Vapi ska då köra request-failed, inte goodbye."""
-    if result.get("error"):
+    if result.get("error") and not result.get("result"):
         return False
     raw = result.get("result")
     payload = raw
@@ -3421,31 +3496,113 @@ def _tool_handler_succeeded(result: dict) -> bool:
             return False
         if payload.get("error") and payload.get("success") is not True:
             return False
+    if result.get("error") and payload is None:
+        return False
     return True
 
 
-def _vapi_tool_json_response(content: Any, *, ok: bool) -> JSONResponse:
-    """2xx bara när verktyget lyckades, annars 422 så request-complete inte spelas."""
-    return JSONResponse(content=content, status_code=200 if ok else 422)
+def _handler_error_reason(result: dict) -> str:
+    if result.get("error") and not result.get("result"):
+        return str(result.get("error"))
+    raw = result.get("result")
+    payload = raw
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    if isinstance(payload, dict):
+        err = payload.get("error") or payload.get("error_message")
+        if err:
+            return str(err)
+        if payload.get("success") is False:
+            return "the order could not be completed."
+    if result.get("error"):
+        return str(result.get("error"))
+    return "the request failed."
+
+
+def _vapi_function_result_entry(result: dict) -> dict:
+    """Function-tool contract: HTTP 200 with result string or error string + toolCallId."""
+    tool_call_id = result.get("toolCallId") or result.get("tool_call_id")
+    name = str(result.get("name") or "")
+    if not _tool_handler_succeeded(result):
+        reason = _handler_error_reason(result)
+        if name == "place_order" and not reason.lower().startswith("order was not saved"):
+            reason = f"Order was not saved: {reason}"
+        entry: Dict[str, Any] = {"error": reason}
+        if tool_call_id:
+            entry["toolCallId"] = tool_call_id
+        return entry
+    raw = result.get("result")
+    if not isinstance(raw, str):
+        raw = json.dumps(raw if raw is not None else {"success": True}, ensure_ascii=False)
+    entry = {"result": raw}
+    if tool_call_id:
+        entry["toolCallId"] = tool_call_id
+    return entry
 
 
 def _vapi_results_response(results: list) -> JSONResponse:
-    ok = bool(results) and all(_tool_handler_succeeded(r) for r in results)
-    return JSONResponse(content={"results": results}, status_code=200 if ok else 422)
+    entries = [_vapi_function_result_entry(r) for r in (results or [])]
+    if not entries:
+        entries = [{"error": "No tool result."}]
+    return JSONResponse(content={"results": entries}, status_code=200)
+
+
+def _vapi_early_tool_error(body: dict, message: str, default_name: str = "") -> JSONResponse:
+    msg = body.get("message") if isinstance(body, dict) else {}
+    calls = _extract_vapi_tool_calls(msg) if isinstance(msg, dict) else []
+    if not calls:
+        err = message
+        cid = _incoming_tool_call_id(body, "")
+        if default_name == "place_order" and not message.lower().startswith("order was not saved"):
+            err = f"Order was not saved: {message}"
+        entry: Dict[str, Any] = {"error": err}
+        if cid:
+            entry["toolCallId"] = cid
+        return JSONResponse(content={"results": [entry]}, status_code=200)
+    results = []
+    for cid, name, _params in calls:
+        err = message
+        if name == "place_order" and not message.lower().startswith("order was not saved"):
+            err = f"Order was not saved: {message}"
+        results.append({"toolCallId": cid, "error": err})
+    return JSONResponse(content={"results": results}, status_code=200)
+
+
+def _vapi_tool_json_response(
+    content: Any,
+    *,
+    ok: bool,
+    tool_call_id: Optional[str] = None,
+    name: Optional[str] = None,
+) -> JSONResponse:
+    """Function tools always use HTTP 200; failure is results[].error."""
+    if isinstance(content, dict) and "results" in content:
+        return JSONResponse(content=content, status_code=200)
+    inferred_name = name or "place_order"
+    if name is None and isinstance(content, dict) and content.get("readback") is not None:
+        inferred_name = "draft_order"
+    inferred_id = tool_call_id or (
+        "direct-draft-order" if inferred_name == "draft_order" else "direct-place-order"
+    )
+    wrapped = {
+        "name": inferred_name,
+        "toolCallId": inferred_id,
+        "result": json.dumps(content, ensure_ascii=False) if not isinstance(content, str) else content,
+    }
+    if not ok and isinstance(content, dict):
+        wrapped["result"] = json.dumps(
+            {"success": False, "error": content.get("error") or "the request failed."},
+            ensure_ascii=False,
+        )
+    return _vapi_results_response([wrapped])
 
 
 def _response_for_direct_place_order_result(result: dict) -> JSONResponse:
-    """Vapi direct function tools läser response body som tool-resultat; håll formen enkel och JSON-baserad."""
-    raw = result.get("result")
-    ok = _tool_handler_succeeded(result)
-    if isinstance(raw, str):
-        try:
-            return _vapi_tool_json_response(json.loads(raw), ok=ok)
-        except json.JSONDecodeError:
-            return _vapi_tool_json_response({"success": False, "error": raw}, ok=False)
-    if isinstance(raw, dict):
-        return _vapi_tool_json_response(raw, ok=ok)
-    return _vapi_tool_json_response({"success": False, "error": "Okänt orderresultat"}, ok=False)
+    """Direct function-tool POSTs still return the webhook results envelope."""
+    return _vapi_results_response([result])
 
 
 def _handle_draft_order_params(
@@ -3724,6 +3881,48 @@ def _handle_place_order_params(
         }
     except Exception as e:
         print(f"❌ place_order exception: {e}")
+        vapi_call_id = _get_call_id_from_webhook(body)
+        if vapi_call_id:
+            existing_call, _lookup_err = order_service.lookup_completed_for_call(
+                _supabase_client, vapi_call_id
+            )
+            if existing_call:
+                cached_response = existing_call.get("response") or {}
+                same_payload = True
+                try:
+                    canonical_items = order_integrity.make_canonical_items_from_resolved(
+                        resolved_items
+                    )
+                    canonical_payload = order_integrity.build_canonical_payload(
+                        restaurant_uuid=restaurant_uuid,
+                        canonical_items=canonical_items,
+                        order_special_requests=_order_special_requests_from_params(params),
+                    )
+                    payload_hash = order_integrity.build_payload_hash(canonical_payload)
+                    same_payload = existing_call.get("payload_hash") == payload_hash
+                except Exception:
+                    same_payload = bool(cached_response.get("order_id"))
+                if same_payload and cached_response.get("order_id"):
+                    return {
+                        "name": "place_order",
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps(
+                            {
+                                "success": True,
+                                "order_id": cached_response.get("order_id"),
+                                "idempotent_replay": True,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                return {
+                    "name": "place_order",
+                    "toolCallId": tool_call_id,
+                    "result": menu_match.place_order_fail_json(
+                        "an order was already saved in this call.",
+                        [],
+                    ),
+                }
         if _circuit_breaker_record_failure(rest_id):
             _send_circuit_breaker_alert(rest_id)
         ops_agent.create_incident(
@@ -3739,7 +3938,7 @@ def _handle_place_order_params(
             "name": "place_order",
             "toolCallId": tool_call_id,
             "result": menu_match.place_order_fail_json(
-                "Beställningen kunde inte genomföras. Försök igen.",
+                "the save could not be confirmed. Try the same order once more.",
                 [],
             ),
         }
@@ -3811,12 +4010,12 @@ async def draft_order(request: Request):
         if (msg.get("type") == "tool-calls" or has_tools) and has_tools:
             rest_id = _get_rest_id_from_request(request, body) or DEFAULT_DASHBOARD_REST_ID
             if not _circuit_breaker_allow(rest_id):
-                return _vapi_results_response([{"error": "Temporärt fel."}])
+                return _vapi_early_tool_error(body, "Temporärt fel.", default_name="draft_order")
             if not _token_bucket_allow(rest_id):
-                return _vapi_results_response([{"error": "För många anrop."}])
+                return _vapi_early_tool_error(body, "För många anrop.", default_name="draft_order")
             restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
             if restaurant_id is None and restaurant_uuid is None:
-                return _vapi_results_response([{"error": "Restaurangen kunde inte hittas."}])
+                return _vapi_early_tool_error(body, "Restaurangen kunde inte hittas.", default_name="draft_order")
             call_id = _get_call_id_from_webhook(body)
             if call_id:
                 _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
@@ -3844,13 +4043,29 @@ async def draft_order(request: Request):
         or (body or {}).get("rest_id")
         or DEFAULT_DASHBOARD_REST_ID
     )
+    direct_id = _incoming_tool_call_id(body, "direct-draft-order")
     if not _circuit_breaker_allow(rest_id):
-        return _vapi_tool_json_response({"success": False, "error": "Temporärt fel. Försök igen om en minut."}, ok=False)
+        return _vapi_tool_json_response(
+            {"success": False, "error": "Temporärt fel. Försök igen om en minut."},
+            ok=False,
+            tool_call_id=direct_id,
+            name="draft_order",
+        )
     if not _token_bucket_allow(rest_id):
-        return _vapi_tool_json_response({"success": False, "error": "För många anrop. Vänta en stund."}, ok=False)
+        return _vapi_tool_json_response(
+            {"success": False, "error": "För många anrop. Vänta en stund."},
+            ok=False,
+            tool_call_id=direct_id,
+            name="draft_order",
+        )
     restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
     if restaurant_id is None and restaurant_uuid is None:
-        return _vapi_tool_json_response({"success": False, "error": "Restaurangen kunde inte hittas."}, ok=False)
+        return _vapi_tool_json_response(
+            {"success": False, "error": "Restaurangen kunde inte hittas."},
+            ok=False,
+            tool_call_id=direct_id,
+            name="draft_order",
+        )
 
     params = _params_from_direct_place_order_payload(body)
     result = _handle_draft_order_params(
@@ -3860,6 +4075,7 @@ async def draft_order(request: Request):
         rest_id,
         restaurant_id,
         restaurant_uuid,
+        tool_call_id=direct_id,
     )
     return _response_for_direct_place_order_result(result)
 
@@ -3871,8 +4087,11 @@ async def place_order(request: Request):
     Supports both Vapi tool-calls format and direct JSON format.
     OBS: Om Vapi-place_order har egen Server URL går tool-calls HIT, inte till /vapi/webhook.
     """
+    body: dict = {}
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
         print("\n!!! PLACE_ORDER ENDPOINT HIT !!! (Vapi skickar tool-calls hit om tool har egen URL)")
         print("="*50)
         print("📥 PLACE_ORDER ANROPAD! (från Vapi Tool URL eller direkt)")
@@ -3897,12 +4116,12 @@ async def place_order(request: Request):
                     rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
                 rest_id = rest_id or "Gislegrillen_01"
                 if not _circuit_breaker_allow(rest_id):
-                    return _vapi_results_response([{"error": "Temporärt fel. Försök igen om en minut."}])
+                    return _vapi_early_tool_error(body, "Temporärt fel. Försök igen om en minut.", default_name="place_order")
                 if not _token_bucket_allow(rest_id):
-                    return _vapi_results_response([{"error": "För många anrop. Vänta en stund."}])
+                    return _vapi_early_tool_error(body, "För många anrop. Vänta en stund.", default_name="place_order")
                 restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
                 if restaurant_id is None and restaurant_uuid is None:
-                    return _vapi_results_response([{"error": "Restaurangen kunde inte hittas."}])
+                    return _vapi_early_tool_error(body, "Restaurangen kunde inte hittas.", default_name="place_order")
                 if call_id:
                     _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
                 calls = _extract_vapi_tool_calls(msg)
@@ -3930,13 +4149,29 @@ async def place_order(request: Request):
         # Direct format: {"items": [...], "special_requests": "..."}
         # Samma orderflöde som Vapi: menyvalidering, Supabase och SMS-status. Optional ?rest_id=.
         rest_direct = (request.query_params.get("rest_id") or "").strip() or "Gislegrillen_01"
+        direct_id = _incoming_tool_call_id(body, "direct-place-order")
         if not _circuit_breaker_allow(rest_direct):
-            return _vapi_tool_json_response({"success": False, "error": "Temporärt fel. Försök igen om en minut."}, ok=False)
+            return _vapi_tool_json_response(
+                {"success": False, "error": "Temporärt fel. Försök igen om en minut."},
+                ok=False,
+                tool_call_id=direct_id,
+                name="place_order",
+            )
         if not _token_bucket_allow(rest_direct):
-            return _vapi_tool_json_response({"success": False, "error": "För många anrop. Vänta en stund."}, ok=False)
+            return _vapi_tool_json_response(
+                {"success": False, "error": "För många anrop. Vänta en stund."},
+                ok=False,
+                tool_call_id=direct_id,
+                name="place_order",
+            )
         restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
         if restaurant_id is None and restaurant_uuid is None:
-            return _vapi_tool_json_response({"success": False, "error": "Restaurangen kunde inte hittas."}, ok=False)
+            return _vapi_tool_json_response(
+                {"success": False, "error": "Restaurangen kunde inte hittas."},
+                ok=False,
+                tool_call_id=direct_id,
+                name="place_order",
+            )
         params = _params_from_direct_place_order_payload(body)
         result = _handle_place_order_params(
             params,
@@ -3945,6 +4180,7 @@ async def place_order(request: Request):
             rest_direct,
             restaurant_id,
             restaurant_uuid,
+            tool_call_id=direct_id,
         )
         return _response_for_direct_place_order_result(result)
         
@@ -3952,7 +4188,11 @@ async def place_order(request: Request):
         raise
     except Exception as e:
         print(f"❌ Error placing order: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return _vapi_early_tool_error(
+            body,
+            "the save could not be confirmed. Try the same order once more.",
+            default_name="place_order",
+        )
 
 @app.post("/update_order_status")
 async def update_order_status(
@@ -4496,14 +4736,16 @@ async def vapi_webhook(request: Request):
     - place_order använder _get_restaurant_for_webhook (cache eller lookup) och sparar order med rätt restaurant_uuid.
     - Request-isolering: vid alla undantag returneras 200 med säkert svar (ingen 500, ingen domino).
     """
+    body: dict = {}
     try:
-        body = await request.json()
-        print(f">>> RAW INCOMING: path=/vapi/webhook, content_length={request.headers.get('content-length')}, type={body.get('message', {}).get('type')}")
+        parsed = await request.json()
+        body = parsed if isinstance(parsed, dict) else {}
+        print(f">>> RAW INCOMING: path=/vapi/webhook, content_length={request.headers.get('content-length')}, type={body.get('message', {}).get('type') if isinstance(body.get('message'), dict) else None}")
         print(f"FULL BODY KEYS: {json.dumps(list(body.keys()))}")
         print(f"MESSAGE TYPE: {body.get('message') and body['message'].get('type')}")
 
         msg = body.get("message", {})
-        event_type = msg.get("type", "unknown")
+        event_type = msg.get("type", "unknown") if isinstance(msg, dict) else "unknown"
 
         print("\n" + "-"*50)
         print(f"📞 VAPI WEBHOOK: event_type={event_type}")
@@ -4518,13 +4760,29 @@ async def vapi_webhook(request: Request):
         # Treat that as place_order instead of returning a generic success for an unknown event.
         if _looks_like_place_order_params(body):
             rest_id = _get_rest_id_from_request(request, body) or "Gislegrillen_01"
+            direct_id = _incoming_tool_call_id(body, "direct-place-order")
             if not _circuit_breaker_allow(rest_id):
-                return _vapi_tool_json_response({"success": False, "error": "Temporärt fel. Försök igen om en minut."}, ok=False)
+                return _vapi_tool_json_response(
+                    {"success": False, "error": "Temporärt fel. Försök igen om en minut."},
+                    ok=False,
+                    tool_call_id=direct_id,
+                    name="place_order",
+                )
             if not _token_bucket_allow(rest_id):
-                return _vapi_tool_json_response({"success": False, "error": "För många anrop. Vänta en stund."}, ok=False)
+                return _vapi_tool_json_response(
+                    {"success": False, "error": "För många anrop. Vänta en stund."},
+                    ok=False,
+                    tool_call_id=direct_id,
+                    name="place_order",
+                )
             restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
             if restaurant_id is None and restaurant_uuid is None:
-                return _vapi_tool_json_response({"success": False, "error": "Restaurangen kunde inte hittas."}, ok=False)
+                return _vapi_tool_json_response(
+                    {"success": False, "error": "Restaurangen kunde inte hittas."},
+                    ok=False,
+                    tool_call_id=direct_id,
+                    name="place_order",
+                )
             params = _params_from_direct_place_order_payload(body)
             result = _handle_place_order_params(
                 params,
@@ -4533,6 +4791,7 @@ async def vapi_webhook(request: Request):
                 rest_id,
                 restaurant_id,
                 restaurant_uuid,
+                tool_call_id=direct_id,
             )
             return _response_for_direct_place_order_result(result)
 
@@ -4553,12 +4812,12 @@ async def vapi_webhook(request: Request):
                 rest_id = _CALL_RESTAURANT_CACHE[call_id].get("restaurant_id") or rest_id
             rest_id = rest_id or "Gislegrillen_01"
             if not _circuit_breaker_allow(rest_id):
-                return _vapi_results_response([{"error": "Temporärt fel. Försök igen om en minut."}])
+                return _vapi_early_tool_error(body, "Temporärt fel. Försök igen om en minut.")
             if not _token_bucket_allow(rest_id):
-                return _vapi_results_response([{"error": "För många anrop. Vänta en stund."}])
+                return _vapi_early_tool_error(body, "För många anrop. Vänta en stund.")
             restaurant_id, restaurant_uuid = _get_restaurant_config_cached(body, request)
             if restaurant_id is None and restaurant_uuid is None:
-                return _vapi_results_response([{"error": "Restaurangen kunde inte hittas."}])
+                return _vapi_early_tool_error(body, "Restaurangen kunde inte hittas.")
             if call_id:
                 _cache_restaurant_for_call(call_id, restaurant_id, restaurant_uuid)
             # DEBUG: logga message.call struktur för att verifiera kundnummer-sökväg
@@ -4589,11 +4848,7 @@ async def vapi_webhook(request: Request):
         
     except Exception as e:
         print(f"❌ Vapi webhook error: {e}")
-        # Request-isolering: returnera alltid 200 så att processen inte kraschar och Vapi inte retry:ar i oändlighet
-        return JSONResponse(
-            content={"success": False, "message": "Något gick fel. Försök igen."},
-            status_code=200,
-        )
+        return _vapi_early_tool_error(body, "Något gick fel. Försök igen.")
 
 # ==================== SERVER STARTUP ====================
 

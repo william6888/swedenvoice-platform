@@ -96,6 +96,11 @@ def build_system_prompt(name: str, menu: dict) -> str:
 TOOL_TIMEOUT_SECONDS = 20
 TOOL_BACKOFF_PLAN = {"type": "fixed", "maxRetries": 0, "baseDelaySeconds": 1}
 PLACE_ORDER_GOODBYE = "din beställning är klar om tio minuter, en kvart, välkommen"
+ACKNOWLEDGEMENT_PHRASES = ["mm", "okej", "ja", "jaha", "va", "hallå", "mhm"]
+VAPI_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
 
 DRAFT_ORDER_FUNCTION = {
     "name": "draft_order",
@@ -157,8 +162,10 @@ PLACE_ORDER_MESSAGES = [
         "role": "system",
         "type": "request-failed",
         "content": (
-            "läs readback igen med små bokstäver och fråga är det bra så? "
-            "lova inte att ordern är sparad. anropa inte endCall."
+            "säg felet i error, en sak. lova inte att ordern är sparad. "
+            "anropa inte endCall. anropa inte transfer_to_staff för det här felet. "
+            "om uppläsningen avbröts eller de ändrade: draft_order igen, läs readback, "
+            "är det bra så?, sen place_order."
         ),
     },
 ]
@@ -221,7 +228,12 @@ def main() -> None:
             fail("VAPI_API_KEY saknas i .env")
         if not WEBHOOK_SHARED_SECRET:
             fail("WEBHOOK_SHARED_SECRET saknas i .env (behövs för tool-headern)")
-        vh = {"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"}
+        vh = {
+            "Authorization": f"Bearer {VAPI_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": VAPI_USER_AGENT,
+        }
 
         print("2/3 Klonar Vapi-assistent ...")
         tpl = httpx.get(f"https://api.vapi.ai/assistant/{TEMPLATE_ASSISTANT_ID}", headers=vh, timeout=20)
@@ -239,11 +251,14 @@ def main() -> None:
             if not tr.is_success:
                 continue
             t = tr.json()
-            tool_name = (t.get("function") or {}).get("name")
+            tool_name = (t.get("function") or {}).get("name") or ""
+            tool_type = t.get("type") or ""
             if tool_name in {"draft_order", "place_order"}:
                 order_tool_templates[tool_name] = t
+            elif tool_name == "endCall" or tool_type == "endCall":
+                print("   ℹ️  hoppar över endCall (hangup via place_order complete)")
             else:
-                keep_tool_ids.append(tid)  # transferCall/endCall är tenant-neutrala
+                keep_tool_ids.append(tid)  # transferCall är tenant-neutral
         missing_tools = {"draft_order", "place_order"} - set(order_tool_templates)
         if missing_tools:
             fail(f"Saknar orderverktyg på mall-assistenten: {', '.join(sorted(missing_tools))}")
@@ -285,6 +300,23 @@ def main() -> None:
             new_order_tool_ids.append(new_tool_id)
             print(f"   ✅ {tool_name} skapad: {new_tool_id}")
 
+        tpl_place = order_tool_templates.get("place_order") or {}
+        tpl_place_id = tpl_place.get("id")
+        if tpl_place_id and tpl_place.get("rejectionPlan") is not None:
+            cleared = httpx.patch(
+                f"https://api.vapi.ai/tool/{tpl_place_id}",
+                headers=vh,
+                timeout=20,
+                json={"rejectionPlan": None},
+            )
+            if cleared.is_success:
+                print("   ✅ mall-place_order.rejectionPlan borttagen")
+            else:
+                print(
+                    f"   ⚠️  Kunde inte nolla mall-place_order.rejectionPlan: "
+                    f"{cleared.status_code} {cleared.text[:200]}"
+                )
+
         system_prompt = build_system_prompt(args.name, menu)
         new_model = {
             k: v
@@ -316,8 +348,13 @@ def main() -> None:
                 payload[k] = template[k]
         payload["firstMessage"] = f"välkommen till {args.name}, vad vill du beställa?"
         ssp = dict(payload.get("stopSpeakingPlan") or {})
-        ssp["acknowledgementPhrases"] = []
+        ssp["numWords"] = 2
+        ssp["voiceSeconds"] = 0.5
+        ssp["backoffSeconds"] = 1
+        ssp["acknowledgementPhrases"] = list(ACKNOWLEDGEMENT_PHRASES)
         payload["stopSpeakingPlan"] = ssp
+        payload["endCallFunctionEnabled"] = False
+        payload["endCallMessage"] = ""
 
         na = httpx.post("https://api.vapi.ai/assistant", headers=vh, json=payload, timeout=30)
         if not na.is_success:

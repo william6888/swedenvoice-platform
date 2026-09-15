@@ -131,7 +131,7 @@ def test_fake_pizza_is_rejected(monkeypatch, tmp_path):
     assert main._supabase_client.get_orders() == []
 
 
-def test_cola_one_point_five_becomes_two_liter(monkeypatch, tmp_path):
+def test_cola_one_point_five_is_rejected(monkeypatch, tmp_path):
     db = _patch_app(monkeypatch, tmp_path)
     captured = {}
 
@@ -161,15 +161,11 @@ def test_cola_one_point_five_becomes_two_liter(monkeypatch, tmp_path):
                     "items": [{"name": "1.5 liter", "quantity": 1, "notes": "cola"}],
                 },
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["ok"] is True
+            assert response.status_code == 422
+            assert response.json()["ok"] is False
 
     _run(check())
-    rows = db.get_orders()
-    assert len(rows) == 1
-    assert rows[0]["source"] == "app"
-    assert rows[0]["items"][0]["name"] == "2 liter"
-    assert "Ta med" in (rows[0].get("special_instructions") or "")
+    assert db.get_orders() == []
 
 
 def test_orders_rejected_when_closed(monkeypatch, tmp_path):

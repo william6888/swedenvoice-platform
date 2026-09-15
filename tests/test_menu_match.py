@@ -115,7 +115,15 @@ class TestExactAndAlias(unittest.TestCase):
         self.assertEqual(m["type"], "alias")
         self.assertEqual(m["canonicalName"], "1.5 liter")
 
-    def test_stor_cola_is_two_liter_not_one_and_a_half(self):
+    def test_kebabfamiljepizza_is_kebabpizza(self):
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "menu.json", "r", encoding="utf-8") as f:
+            menu = json.load(f)
+        idx = menu_match.build_menu_index(menu, "g1")
+        m = idx.match_one("kebabfamiljepizza", "g1")
+        self.assertIn(m["type"], ("exact", "alias"))
+        self.assertEqual(m["canonicalName"], "Kebabpizza")
+        self.assertEqual(m["itemId"], 35)
         root = Path(__file__).resolve().parent.parent
         with open(root / "menu.json", "r", encoding="utf-8") as f:
             menu = json.load(f)
