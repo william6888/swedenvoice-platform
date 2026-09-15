@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -226,15 +227,128 @@ def test_strict_place_rejects_payload_changed_after_readback(monkeypatch, _reset
     assert "valideras och läsas upp igen" in payload["error"]
 
 
-def test_cola_on_1_5_liter_is_rewritten_to_2_liter():
-    items = M._normalize_drink_items(
+def test_cola_on_1_5_liter_is_rejected():
+    err = M._unsupported_drink_combo_error(
         [{"name": "1.5 liter", "quantity": 1, "special_requests": "cola"}]
     )
-    assert items[0]["name"] == "2 liter"
-    pepsi = M._normalize_drink_items(
+    assert err is not None
+    assert "2 liter" in err
+    assert M._unsupported_drink_combo_error(
         [{"name": "2 liter", "quantity": 1, "special_requests": "pepsi max"}]
     )
-    assert pepsi[0]["name"] == "1.5 liter"
+
+
+def test_bare_1_5_liter_without_pepsi_max_is_rejected():
+    err = M._unsupported_drink_combo_error(
+        [{"name": "1.5 liter", "quantity": 1, "special_requests": ""}]
+    )
+    assert err is not None
+    assert "pepsi max" in err
+
+
+def test_pepsi_max_1_5_liter_is_allowed():
+    assert M._unsupported_drink_combo_error(
+        [{"name": "1.5 liter", "quantity": 1, "special_requests": "pepsi max"}]
+    ) is None
+
+
+def test_cola_1_5_liter_cannot_be_saved(monkeypatch):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
+    body = {"message": {"call": {"id": "call-cola-15"}}}
+    result = M._handle_draft_order_params(
+        {
+            "items": [{"name": "1.5 liter", "quantity": 1, "special_requests": "cola"}],
+            "service_mode": "ta_med",
+        },
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tc-cola-15",
+    )
+    payload = json.loads(result["result"])
+    assert payload["success"] is False
+    assert "1.5" in payload["error"]
+
+
+def test_pepsi_max_2_liter_cannot_be_saved(monkeypatch):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
+    body = {"message": {"call": {"id": "call-pepsi-2l"}}}
+    result = M._handle_draft_order_params(
+        {
+            "items": [{"name": "2 liter", "quantity": 1, "special_requests": "pepsi max"}],
+            "service_mode": "ta_med",
+        },
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tc-pepsi-2l",
+    )
+    payload = json.loads(result["result"])
+    assert payload["success"] is False
+    assert "1.5" in payload["error"]
+
+
+def test_stor_cola_drafts_as_2_liter(monkeypatch):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
+    body = {"message": {"call": {"id": "call-stor-cola"}}}
+    result = M._handle_draft_order_params(
+        {
+            "items": [{"name": "stor cola", "quantity": 1, "special_requests": "cola"}],
+            "service_mode": "ta_med",
+        },
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tc-stor-cola",
+    )
+    payload = json.loads(result["result"])
+    assert payload["success"] is True
+    assert "två liter" in payload["readback"] or "2 liter" in payload["readback"]
+
+
+def test_kebab_family_pizza_is_not_kebab_bread(monkeypatch):
+    monkeypatch.setattr(M, "REQUIRE_DRAFT_TOKEN", False)
+    body = {"message": {"call": {"id": "call-kebab-fam"}}}
+    result = M._handle_draft_order_params(
+        {
+            "items": [
+                {"name": "kebabfamiljepizza", "quantity": 1, "special_requests": "familj"}
+            ],
+            "service_mode": "ta_med",
+        },
+        body,
+        None,
+        "Gislegrillen_01",
+        "Gislegrillen_01",
+        "u-rest-1",
+        tool_call_id="tc-kebab-fam",
+    )
+    payload = json.loads(result["result"])
+    assert payload["success"] is True
+    assert "kebabpizza" in payload["readback"]
+    assert "bröd" not in payload["readback"]
+
+
+def test_kebab_bread_with_family_note_becomes_kebabpizza():
+    menu = json.loads(
+        (Path(__file__).resolve().parent.parent / "menu.json").read_text(encoding="utf-8")
+    )
+    index = M.menu_match.get_or_build_menu_index("kebab-fam-test", menu)
+    ok, resolved, unmatched = M.menu_match.resolve_order_items(
+        [{"name": "Kebab med bröd", "quantity": 1, "special_requests": "familj"}],
+        index,
+        "kebab-fam-test",
+    )
+    assert ok
+    remapped = M._remap_family_kebab_bread(resolved, index)
+    assert remapped[0]["name"] == "Kebabpizza"
+    assert remapped[0]["id"] == 35
 
 
 def test_service_mode_is_not_copied_into_order_notes():

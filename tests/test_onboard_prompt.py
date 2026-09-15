@@ -63,3 +63,18 @@ def test_order_tool_messages_follow_vapi_reliability_guidance():
         assert start["content"] == "okej,"
         assert delayed["content"] == "det tar en sekund till,"
         assert delayed["timingMilliseconds"] == 5000
+
+
+def test_acknowledgement_phrases_are_swedish_backchannels():
+    from scripts.onboard_pizzeria import ACKNOWLEDGEMENT_PHRASES
+
+    assert ACKNOWLEDGEMENT_PHRASES == ["mm", "okej", "ja", "jaha", "va", "hallå", "mhm"]
+
+
+def test_place_order_failed_message_speaks_error_not_transfer():
+    from scripts.onboard_pizzeria import PLACE_ORDER_MESSAGES
+
+    failed = next(m for m in PLACE_ORDER_MESSAGES if m["type"] == "request-failed")
+    assert "error" in failed["content"]
+    assert "transfer_to_staff" in failed["content"]
+    assert "endCall" in failed["content"]
